@@ -81,7 +81,13 @@ public:
     u32 capacity() const { return cap_; }
 
     // Pushes rejected for want of room, and the bytes they carried. Non-zero
-    // means the trace has a hole in it. The block sequence numbers in the
+    // means the trace has a hole in it.
+    //
+    // These counters, and high_water(), are written by the producer and read
+    // by whoever is watching -- without volatile and without synchronisation.
+    // That is deliberate: they are diagnostics, not control flow, so a read
+    // that catches a stale value costs nothing. Never branch on them from
+    // the consumer side expecting them to be current. The block sequence numbers in the
     // trace format are what let a reader find that hole later; these
     // counters are what let the device notice it at the time.
     u32 drops() const { return drops_; }

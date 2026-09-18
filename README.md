@@ -1,5 +1,7 @@
 # rewind
 
+[![CI](https://github.com/juanlumc1988/rewind-mcu/actions/workflows/ci.yml/badge.svg)](https://github.com/juanlumc1988/rewind-mcu/actions/workflows/ci.yml)
+
 Deterministic record & replay for bare-metal firmware.
 
 Record what crosses the hardware boundary on a device; replay it bit-for-bit
@@ -169,7 +171,7 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
 | `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `tests/`    | 88 cases, 5.2 million assertions               | C++17 |
+| `tests/`    | 90 cases, 5.2 million assertions               | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -190,7 +192,11 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-Cross-compiling the two libraries that would ship on the device:
+CI runs this on GCC and Clang, in Debug and RelWithDebInfo, with warnings as
+errors; separately under ASan and UBSan; and separately again cross-compiled
+to a Cortex-M4.
+
+Cross-compiling the libraries that would ship on the device:
 
 ```console
 cmake -S . -B build-arm -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
@@ -263,6 +269,31 @@ for (;;) {
 ```
 
 No allocation anywhere: both buffers are the caller's, sized at link time.
+
+### What it costs in flash
+
+Built for a Cortex-M4 at `-Os`, measured in CI on every push:
+
+| Object | text (flash) | bss |
+|---|---:|---:|
+| `trace_writer.cpp` | 1044 | 0 |
+| `hal.cpp` | 657 | 50 |
+| `ring_buffer.cpp` | 334 | 0 |
+| `recorder.cpp` | 278 | 0 |
+| `varint.cpp` | 166 | 0 |
+| `crc32.cpp` | 140 | 0 |
+| `cortex_m.cpp` | 126 | 0 |
+| `clock.cpp` | 98 | 0 |
+| **recording total** | **2843** | **50** |
+| `trace_reader.cpp` | 1521 | 0 |
+
+**Roughly 2.8 KB of flash and 50 bytes of .bss to record.** The reader is
+only linked in if the device replays its own traces — useful after a
+watchdog reset, and discarded by `--gc-sections` otherwise.
+
+CI also asserts that none of this pulls in `malloc`, `_Unwind`, `__cxa_throw`
+or `typeinfo`. The claim that the target side has no heap, no exceptions and
+no RTTI is checkable, so it is checked rather than reviewed.
 
 Recording happens in whatever context touched the peripheral — main loop or
 ISR — so a push can interrupt another push, and the sink masks interrupts
@@ -342,8 +373,9 @@ Stated plainly, because the gap between this and the pitch is real:
   simulated UART. No SWO, RTT or real UART driver ships here.
 - **No DMA.** The event type is designed and not implemented.
 - **No GUI.** Timeline scrubbing and trace diffing are the eventual Qt layer.
-- **Overhead is unmeasured.** The <2% target is a design goal with no number
-  behind it yet, and it cannot get one without hardware.
+- **CPU overhead is unmeasured.** Flash cost is now measured in CI (2.8 KB to
+  record), but the <2% runtime target is still a design goal with no number
+  behind it. It cannot get one without a part to run on.
 
 ## Roadmap
 

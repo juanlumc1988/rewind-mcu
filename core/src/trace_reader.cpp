@@ -25,6 +25,29 @@ bool TraceReader::fail(const char* why) {
 }
 
 bool TraceReader::open(const u8* data, u32 len) {
+    // Drop every trace of a previous trace before validating this one, so a
+    // failed open leaves the reader unusable rather than still pointing at
+    // the last one with its counters intact. Resetting only part of it is
+    // worse than resetting none: it looks clean and is not.
+    data_           = 0;
+    len_            = 0;
+    block_end_      = 0;
+    pos_            = 0;
+    next_block_off_ = 0;
+    last_ts_        = 0;
+    last_addr_      = 0;
+    expect_seq_     = 0;
+    blocks_read_    = 0;
+    blocks_lost_    = 0;
+    opened_         = false;
+    done_           = false;
+    err_            = 0;
+    hdr_.magic      = 0;
+    hdr_.version    = 0;
+    hdr_.flags      = 0;
+    hdr_.build_id   = 0;
+    hdr_.seed       = 0;
+
     if (data == 0) {
         return fail("null trace buffer");
     }
@@ -46,21 +69,16 @@ bool TraceReader::open(const u8* data, u32 len) {
 
     data_           = data;
     len_            = len;
-    block_end_      = 0;
-    pos_            = 0;
     next_block_off_ = kTraceHeaderSize;
-    last_ts_        = 0;
-    last_addr_      = 0;
-    expect_seq_     = 0;
-    blocks_read_    = 0;
-    blocks_lost_    = 0;
     opened_         = true;
-    done_           = false;
     return true;
 }
 
 bool TraceReader::load_next_block() {
-    if (next_block_off_ + 4 > len_) {
+    // Written as a subtraction rather than next_block_off_ + 4 > len_, which
+    // wraps when the offset is near 2^32. len_ >= kTraceHeaderSize is
+    // guaranteed by open(), so len_ - 4 cannot underflow.
+    if (next_block_off_ > len_ - 4u) {
         // No room for a length word: the trace was cut short. Everything
         // handed out so far was CRC-checked, so report end rather than error.
         done_ = true;
@@ -178,12 +196,20 @@ bool TraceReader::next(Event* out) {
         off += n;
 
         if (is_mmio) {
-            const i64 absolute = (i64)last_addr_ + zigzag_decode(raw);
-            if (absolute < 0 || absolute > (i64)0xFFFFFFFF) {
+            // Range-check the delta BEFORE adding it. A corrupt or hostile
+            // trace can encode a delta near INT64_MIN, and
+            // (i64)last_addr_ + that is signed overflow -- undefined
+            // behaviour in a routine whose whole job is parsing input it
+            // does not trust. Both bounds below are computed from
+            // last_addr_, which is a u32, so neither can overflow.
+            const i64 delta = zigzag_decode(raw);
+            const i64 lower = -(i64)last_addr_;
+            const i64 upper = (i64)(0xFFFFFFFFu - last_addr_);
+            if (delta < lower || delta > upper) {
                 done_ = true;
                 return fail("address delta lands outside the 32-bit space");
             }
-            addr       = (u32)absolute;
+            addr       = (u32)((i64)last_addr_ + delta);
             last_addr_ = addr;
         } else {
             if (raw > 0xFFFFFFFFu) {

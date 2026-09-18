@@ -1,0 +1,161 @@
+# SPDX-License-Identifier: Apache-2.0
+# Part of rewind -- deterministic record & replay for bare-metal firmware.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The host suite, on both compilers and both build types. Warnings are
+  # errors here: the strict C++98 guard over core/, target/, sim/ and
+  # firmware/ is enforced by the compiler, and a job that tolerated warnings
+  # would quietly let it rot.
+  host:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, RelWithDebInfo]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+        run: |
+          cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -DREWIND_WERROR=ON
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # The CLI is the part a user actually touches, and none of the unit
+      # tests exercise argument parsing or file I/O.
+      - name: Exercise the command line
+        run: |
+          set -euo pipefail
+          ./build/rewind hunt --from 1 --to 30 --save /tmp/bug.rwd
+          ./build/rewind dump /tmp/bug.rwd --limit 20
+          ./build/rewind inspect /tmp/bug.rwd --find-consumed 5
+          ./build/rewind inspect /tmp/bug.rwd --at 200 --walk 5
+          ./build/rewind sizing --seed 7 --drain 512
+          # A trace with the bug replays to a non-zero exit; a clean one
+          # does not. Both are expected outcomes, so check them explicitly.
+          ./build/rewind replay /tmp/bug.rwd
+          ./build/rewind record --seed 1 --variant fixed --out /tmp/clean.rwd
+          ./build/rewind replay /tmp/clean.rwd
+
+  # Address and undefined-behaviour sanitizers over the whole suite. The
+  # trace reader parses input it has no reason to trust, and the tests feed
+  # it deliberately malformed traces, so this is where that pays off.
+  sanitizers:
+    name: asan + ubsan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-san -G Ninja \
+                -DCMAKE_BUILD_TYPE=Debug \
+                -DREWIND_WERROR=ON \
+                -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+
+      - name: Build
+        run: cmake --build build-san -j
+
+      - name: Test
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: ./build-san/rewind_tests
+
+  # The premise of the whole project is that core/ and target/ cross-compile
+  # to a microcontroller. Asserting that in a README is worth nothing; this
+  # job proves it on every push, and reports the flash footprint while it is
+  # there -- which is the number that decides whether recording is
+  # affordable on a given part.
+  cross-arm:
+    name: arm-none-eabi (cortex-m4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build gcc-arm-none-eabi binutils-arm-none-eabi
+
+      - name: Configure for the target
+        run: |
+          cmake -S . -B build-arm -G Ninja \
+                -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
+                -DCMAKE_BUILD_TYPE=MinSizeRel \
+                -DREWIND_BUILD_TESTS=OFF \
+                -DREWIND_WERROR=ON
+
+      # Only the libraries that would ship on the device. host/ is
+      # workstation code and is not expected to cross-compile.
+      - name: Build the target-side libraries
+        run: |
+          cmake --build build-arm -j \
+                --target rewind_core rewind_target rewind_sim rewind_fw
+
+      # The target side claims no heap, no exceptions and no RTTI. That claim
+      # is checkable, so check it rather than trusting the review that let it
+      # in: any of these symbols appearing as undefined means something in
+      # core/ or target/ started pulling in a runtime the device may not have.
+      - name: Assert no heap, exceptions or RTTI
+        run: |
+          set -euo pipefail
+          undefined=$(arm-none-eabi-nm -u \
+                        build-arm/librewind_core.a \
+                        build-arm/librewind_target.a \
+                      | grep -iE 'malloc|free|realloc|_Unwind|__cxa_throw|__cxa_begin_catch|typeinfo|operator new|operator delete' \
+                      | sort -u || true)
+          if [ -n "$undefined" ]; then
+            echo "Target-side code pulled in a forbidden runtime dependency:"
+            echo "$undefined"
+            exit 1
+          fi
+          echo "clean: no heap, no exceptions, no RTTI"
+
+      - name: Report flash footprint
+        run: |
+          {
+            echo "### Cortex-M4 footprint (MinSizeRel)"
+            echo
+            echo '```'
+            arm-none-eabi-size -t build-arm/librewind_core.a \
+                               build-arm/librewind_target.a
+            echo '```'
+            echo
+            echo "\`text\` is flash; \`bss\` is the shim's own static state."
+            echo "The trace and ring buffers are supplied by the caller and"
+            echo "are not counted here."
+          } >> "$GITHUB_STEP_SUMMARY"
+          arm-none-eabi-size -t build-arm/librewind_core.a build-arm/librewind_target.a

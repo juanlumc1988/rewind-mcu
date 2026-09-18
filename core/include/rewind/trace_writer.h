@@ -72,6 +72,10 @@ public:
     // Blocks the sink refused. Non-zero means the trace has a hole; the
     // sequence numbers show a reader exactly where and how big.
     u32  blocks_lost() const { return blocks_lost_; }
+
+    // Events handed to the writer -- which is not the same as events that
+    // reached the sink. When blocks_lost() is non-zero, some of these are in
+    // blocks that never made it out.
     u64  bytes_written() const { return bytes_; }
     u16  flags() const { return flags_; }
 
@@ -85,7 +89,8 @@ private:
     bool write_mmio(u8 type, u64 ts, u32 addr, u32 value);
     bool write_plain(u8 type, u64 ts, const u32* arg);
     bool stage(const u8* bytes, u32 n);
-    bool flush_block();
+    // Always succeeds: a block the sink refuses is counted, not an error.
+    void flush_block();
     bool emit(const u8* data, u32 len);
     u32  payload_cap() const;
     void fail(const char* why);

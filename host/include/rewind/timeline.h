@@ -59,10 +59,12 @@ struct Snapshot {
     u64         ts          = 0;   // cycle count of the last event served
     u32         main_iter   = 0;   // main-loop iteration in progress
     u64         state_hash  = 0;
-    fw::State   fw;
     bool        valid = false;
 
-    Snapshot() { fw.head = 0; }
+    // Value-initialised, so reading a snapshot that was never filled gives
+    // zeroes rather than whatever was on the stack. fw::State is a C++98
+    // aggregate with no constructor of its own.
+    fw::State   fw = fw::State();
 };
 
 class Timeline {

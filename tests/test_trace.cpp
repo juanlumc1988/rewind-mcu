@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "rewind/replay.h"
+#include "rewind/crc32.h"
 #include "rewind/trace_reader.h"
 #include "rewind/trace_writer.h"
 
@@ -463,4 +464,165 @@ TEST_CASE("the CRC covers the sequence number") {
     CHECK_FALSE(reader.ok());
     CHECK(std::string(reader.error()).find("CRC") != std::string::npos);
     CHECK(reader.blocks_lost() == 0u);
+}
+
+
+namespace {
+
+// Builds a single-block trace around a caller-supplied payload, with a valid
+// header and a correct CRC. The point is to produce traces the writer would
+// never emit -- a CRC check cannot save you from a trace that was crafted,
+// only from one that was damaged.
+std::vector<u8> handmade_trace(const std::vector<u8>& payload) {
+    std::vector<u8> trace(rwd::kTraceHeaderSize, 0);
+    rwd::put_u32_le(trace.data() + 0, rwd::kTraceMagic);
+    rwd::put_u16_le(trace.data() + 4, rwd::kTraceVersion);
+    rwd::put_u16_le(trace.data() + 6, rwd::kFlagRecordWrites);
+
+    u8 frame[8];
+    rwd::put_u32_le(frame + 0, (u32)payload.size());
+    rwd::put_u32_le(frame + 4, 0u);   // seq
+    trace.insert(trace.end(), frame, frame + 8);
+    trace.insert(trace.end(), payload.begin(), payload.end());
+
+    u32 crc = rwd::crc32_update(rwd::crc32_init(), frame + 4, 4);
+    crc     = rwd::crc32_update(crc, payload.data(), (u32)payload.size());
+    u8 tail[4];
+    rwd::put_u32_le(tail, rwd::crc32_final(crc));
+    trace.insert(trace.end(), tail, tail + 4);
+
+    rwd::put_u32_le(tail, 0u);        // terminator
+    trace.insert(trace.end(), tail, tail + 4);
+    return trace;
+}
+
+void append_varint(std::vector<u8>* out, u64 value) {
+    u8        buf[rwd::kVarintMaxBytes];
+    const u32 n = rwd::varint_encode(value, buf);
+    out->insert(out->end(), buf, buf + n);
+}
+
+} // namespace
+
+TEST_CASE("an extreme address delta is rejected, not computed") {
+    // The reader reconstructs an address by adding a signed delta to the
+    // previous one. A delta near INT64_MIN makes that addition overflow,
+    // which is undefined behaviour -- in a routine whose entire job is
+    // parsing input it has no reason to trust.
+    //
+    // A CRC does not help here: this trace's CRC is correct. It is a
+    // well-formed trace that says something impossible, which is exactly
+    // what a hostile one looks like.
+    SUBCASE("most negative delta") {
+        std::vector<u8> payload;
+        payload.push_back((u8)rwd::EV_MMIO_READ);
+        append_varint(&payload, 0u);                       // delta_ts
+        append_varint(&payload, 18446744073709551615ULL);  // zigzag INT64_MIN
+        append_varint(&payload, 0u);                       // value
+
+        const std::vector<u8> trace = handmade_trace(payload);
+        rwd::TraceReader      reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+
+        rwd::Event ev;
+        CHECK_FALSE(reader.next(&ev));
+        CHECK_FALSE(reader.ok());
+        CHECK(std::string(reader.error()).find("32-bit space") != std::string::npos);
+    }
+
+    SUBCASE("most positive delta, from a non-zero address") {
+        // The non-zero part matters and is easy to get wrong. Starting from
+        // address 0, even INT64_MAX added to it stays inside i64 and nothing
+        // overflows -- so a test that uses only the first event proves
+        // nothing. The overflow needs a previous address above zero, which
+        // is also the only situation that arises in a real trace.
+        std::vector<u8> payload;
+        payload.push_back((u8)rwd::EV_MMIO_READ);
+        append_varint(&payload, 0u);
+        append_varint(&payload, rwd::zigzag_encode(1));    // addr := 1
+        append_varint(&payload, 0u);
+
+        payload.push_back((u8)rwd::EV_MMIO_READ);
+        append_varint(&payload, 0u);
+        append_varint(&payload, 18446744073709551614ULL);  // zigzag INT64_MAX
+        append_varint(&payload, 0u);
+
+        const std::vector<u8> trace = handmade_trace(payload);
+        rwd::TraceReader      reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+
+        rwd::Event ev;
+        REQUIRE(reader.next(&ev));
+        CHECK(ev.addr == 1u);
+        CHECK_FALSE(reader.next(&ev));
+        CHECK_FALSE(reader.ok());
+        CHECK(std::string(reader.error()).find("32-bit space") != std::string::npos);
+    }
+
+    SUBCASE("a delta that just leaves the address space") {
+        // First event lands at 0, so any negative delta is out of range.
+        std::vector<u8> payload;
+        payload.push_back((u8)rwd::EV_MMIO_READ);
+        append_varint(&payload, 0u);
+        append_varint(&payload, rwd::zigzag_encode(-1));
+        append_varint(&payload, 0u);
+
+        const std::vector<u8> trace = handmade_trace(payload);
+        rwd::TraceReader      reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+
+        rwd::Event ev;
+        CHECK_FALSE(reader.next(&ev));
+        CHECK(std::string(reader.error()).find("32-bit space") != std::string::npos);
+    }
+
+    SUBCASE("the extremes of the address space are still accepted") {
+        // 0 then 0xFFFFFFFF then back to 0: the largest legitimate deltas
+        // either way must survive the range check.
+        std::vector<u8> payload;
+        payload.push_back((u8)rwd::EV_MMIO_READ);
+        append_varint(&payload, 1u);
+        append_varint(&payload, rwd::zigzag_encode(0));
+        append_varint(&payload, 0xAAAAAAAAu);
+
+        payload.push_back((u8)rwd::EV_MMIO_READ);
+        append_varint(&payload, 1u);
+        append_varint(&payload, rwd::zigzag_encode((rwd::i64)0xFFFFFFFF));
+        append_varint(&payload, 0xBBBBBBBBu);
+
+        payload.push_back((u8)rwd::EV_MMIO_READ);
+        append_varint(&payload, 1u);
+        append_varint(&payload, rwd::zigzag_encode(-(rwd::i64)0xFFFFFFFF));
+        append_varint(&payload, 0xCCCCCCCCu);
+
+        const std::vector<u8> trace = handmade_trace(payload);
+        rwd::TraceReader      reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+
+        rwd::Event ev;
+        REQUIRE(reader.next(&ev));
+        CHECK(ev.addr == 0u);
+        REQUIRE(reader.next(&ev));
+        CHECK(ev.addr == 0xFFFFFFFFu);
+        REQUIRE(reader.next(&ev));
+        CHECK(ev.addr == 0u);
+        CHECK(reader.ok());
+    }
+}
+
+TEST_CASE("a failed open leaves the reader unusable, not half-open") {
+    // Reopening with a bad trace must not leave the reader quietly serving
+    // events from the previous one.
+    const Recorded   good = make_trace(50);
+    rwd::TraceReader reader;
+    REQUIRE(reader.open(good.bytes.data(), (u32)good.bytes.size()));
+
+    rwd::Event ev;
+    REQUIRE(reader.next(&ev));
+
+    const u8 rubbish[40] = { 0 };
+    CHECK_FALSE(reader.open(rubbish, sizeof(rubbish)));
+    CHECK_FALSE(reader.ok());
+    CHECK_FALSE(reader.next(&ev));     // not still reading the first trace
+    CHECK(reader.blocks_read() == 0u);
 }

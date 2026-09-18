@@ -75,10 +75,10 @@ bool TraceWriter::begin(SinkFn sink, void* ctx, u8* buffer, u32 buf_len,
     return emit(header, kTraceHeaderSize);
 }
 
-bool TraceWriter::flush_block() {
+void TraceWriter::flush_block() {
     if (used_ == 0) {
         // Never emit an empty block: payload_len == 0 is the terminator.
-        return ok_;
+        return;
     }
 
     put_u32_le(buf_ + 0, used_);
@@ -102,16 +102,13 @@ bool TraceWriter::flush_block() {
 
     ++block_seq_;
     used_ = 0;
-    return true;
 }
 
 // Copies a staged event into the block buffer, flushing first if it will not
 // fit. cap_ >= kMinBlockBuffer >= kMaxEventBytes guarantees it fits after.
 bool TraceWriter::stage(const u8* bytes, u32 n) {
     if (used_ + n > payload_cap()) {
-        if (!flush_block()) {
-            return false;
-        }
+        flush_block();
     }
     // Guaranteed to fit now: payload_cap() >= kMinBlockBuffer - kBlockOverhead
     // >= kMaxEventBytes.
