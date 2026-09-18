@@ -185,8 +185,19 @@ code-review argument.
 
 ## Build and test
 
-Needs CMake 3.16+ and a C++17 compiler for the host side. No dependencies to
-install: doctest is vendored, and nothing else is used.
+Needs CMake 3.16+, Ninja, and a C++17 compiler for the host side. No library
+dependencies to install: doctest is vendored, and nothing else is used.
+
+On Ubuntu/Debian, that's:
+
+```console
+sudo apt install cmake ninja-build g++
+```
+
+(`g++` pulls in the compiler; swap it for `clang` if you'd rather use Clang.
+If you'd rather not install Ninja, drop `-G Ninja` below — CMake falls back
+to Unix Makefiles, which `build-essential`/`g++` already provides `make`
+for.)
 
 ```console
 git clone https://github.com/juanlumc1988/rewind-mcu.git
@@ -201,7 +212,10 @@ CI runs this on GCC and Clang, in Debug and RelWithDebInfo, with warnings as
 errors; separately under ASan and UBSan; and separately again cross-compiled
 to a Cortex-M4.
 
-Cross-compiling the libraries that would ship on the device:
+Cross-compiling the libraries that would ship on the device needs the
+`arm-none-eabi` toolchain (`sudo apt install gcc-arm-none-eabi` on
+Ubuntu/Debian) — separate from the host compiler above, and not required
+just to build and test on the host:
 
 ```console
 cmake -S . -B build-arm -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
