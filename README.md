@@ -1,19 +1,24 @@
-# rewind
+# rewind-mcu
 
 [![CI](https://github.com/juanlumc1988/rewind-mcu/actions/workflows/ci.yml/badge.svg)](https://github.com/juanlumc1988/rewind-mcu/actions/workflows/ci.yml)
 
-Deterministic record & replay for bare-metal firmware.
+Deterministic record & replay for bare-metal firmware. The command it builds
+is `rewind`.
 
 Record what crosses the hardware boundary on a device; replay it bit-for-bit
 on your workstation, with no hardware and no simulator involved. A failure
 that happens once a week in the field becomes a file you can reproduce on
 demand.
 
-**Status: milestone 2.** Record, replay and reverse execution work end to
-end, and the device-side path — ring buffer, drain loop, cycle-counter
-extension, Cortex-M backend — is written and tested on the host. Nothing has
-run on real silicon yet; see
-[What this does not do yet](#what-this-does-not-do-yet).
+**Status.** Recording, replay and reverse execution work end to end. The
+device-side path — ring buffer, drain loop, cycle-counter extension,
+Cortex-M backend — is written, cross-compiles to a Cortex-M4 on every push,
+and is tested on the host.
+
+**It has never run on real silicon.** That is the gap that matters, and it
+is not a small one: see
+[What this does not do yet](#what-this-does-not-do-yet) before relying on
+any of this.
 
 ## The problem
 
