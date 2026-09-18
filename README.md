@@ -102,7 +102,12 @@ code-review argument.
 
 ## Build and test
 
+Needs CMake 3.16+ and a C++17 compiler for the host side. No dependencies to
+install: doctest is vendored, and nothing else is used.
+
 ```console
+git clone https://github.com/juanlumc1988/rewind-mcu.git
+cd rewind-mcu
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
 ./build/rewind_tests
