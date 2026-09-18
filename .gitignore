@@ -1,0 +1,125 @@
+# ---- Build directories ----
+build/
+build-*/
+out/
+cmake-build-*/
+_deps/
+
+# ---- CMake artefacts ----
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# ---- Make / Ninja ----
+Makefile
+!cmake/**/Makefile
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# ---- Compiled object / intermediate files ----
+*.o
+*.obj
+*.lo
+*.slo
+*.ko
+*.gch
+*.pch
+*.d
+*.i
+*.ii
+*.s
+!sim/**/*.s
+
+# ---- Libraries ----
+*.a
+*.la
+*.lai
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# ---- Executables ----
+*.exe
+*.out
+*.app
+*.elf
+*.bin
+*.hex
+*.map
+a.out
+
+# ---- Debug / profiling ----
+*.dSYM/
+*.su
+*.idb
+*.pdb
+*.gcno
+*.gcda
+*.gcov
+coverage/
+*.profraw
+*.profdata
+callgrind.out.*
+perf.data
+perf.data.old
+vgcore.*
+# NOT a bare `core` rule: this project has a core/ directory, and the usual
+# core-dump pattern would silently swallow it. core.1234 and vgcore.* still
+# match; an unsuffixed ./core dump is the price, and it is the right way round.
+core.[0-9]*
+
+# ---- Sanitizer / analysis output ----
+*.asan
+*.tsan
+*.ubsan
+cppcheck-report.*
+scan-build-*/
+
+# ---- rewind: recorded traces are build products, not sources ----
+# Regression fixtures are committed explicitly under tests/fixtures/ via
+#   git add -f tests/fixtures/<name>.rwd
+*.rwd
+!tests/fixtures/*.rwd
+
+# ---- Editors / IDE ----
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.clangd/
+*.kdev4
+.kdev4/
+*.user
+*.user.*
+*.autosave
+
+# ---- Qt (future GUI module) ----
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.moc
+.qmake.stash
+.qmake.cache
+*.pro.user
+*.pro.user.*
+*.qm
+
+# ---- OS noise ----
+.DS_Store
+Thumbs.db
+desktop.ini
