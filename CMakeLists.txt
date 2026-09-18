@@ -97,7 +97,8 @@ rewind_target_side(rewind_fw)
 
 add_library(rewind_host STATIC
     host/src/replay.cpp
-    host/src/session.cpp)
+    host/src/session.cpp
+    host/src/timeline.cpp)
 target_include_directories(rewind_host PUBLIC host/include)
 target_link_libraries(rewind_host PUBLIC rewind_fw rewind_sim rewind_target rewind_core)
 rewind_host_side(rewind_host)
@@ -122,6 +123,7 @@ if(REWIND_BUILD_TESTS)
         tests/test_hal.cpp
         tests/test_clock.cpp
         tests/test_recorder.cpp
+        tests/test_timeline.cpp
         tests/test_determinism.cpp)
     target_include_directories(rewind_tests PRIVATE tests/third_party)
     target_link_libraries(rewind_tests PRIVATE rewind_host)

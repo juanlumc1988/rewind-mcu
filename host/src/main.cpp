@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rewind/session.h"
+#include "rewind/timeline.h"
 #include "rewind/trace_reader.h"
 #include "sim/mcu.h"
 
@@ -32,6 +33,8 @@ int usage() {
         "  rewind replay FILE [--iters N]\n"
         "  rewind dump   FILE [--limit N]\n"
         "  rewind sizing [--seed N] [--drain N] [--fifo N] [--slices N]\n"
+        "  rewind inspect FILE [--at N] [--walk M] [--stride K]\n"
+        "                      [--find-consumed N] [--iters N]\n"
         "\n"
         "common options:\n"
         "  --seed N      simulator seed; picks the interrupt arrival schedule\n"
@@ -42,6 +45,16 @@ int usage() {
         "                recording when replaying.\n"
         "  --no-writes   omit MMIO writes from the trace: smaller, but replay\n"
         "                loses its consistency check\n"
+        "\n"
+        "inspect options -- reverse execution over a recorded run:\n"
+        "  --at N            go to event N (default: the end of the run)\n"
+        "  --walk M          then step backwards M times, printing each\n"
+        "  --stride K        events per backward step (default 1)\n"
+        "  --find-consumed N bisect to the first point where the firmware had\n"
+        "                    consumed N bytes, then walk back from there\n"
+        "  --checkpoints K   snapshot every K main-loop iterations (default\n"
+        "                    128). Raise it hugely to see what navigation\n"
+        "                    costs without checkpoints.\n"
         "\n"
         "sizing options:\n"
         "  --drain N     bytes moved from the ring per pass through the main\n"
@@ -120,6 +133,13 @@ struct Args {
     u32         drain    = 4096;
     u32         fifo     = 0xFFFFFFFFu;
     u32         slices   = 60;
+    u64         at       = 0;
+    bool        has_at   = false;
+    u32         walk     = 0;
+    u32         stride   = 1;
+    u32         find     = 0;
+    bool        has_find = false;
+    u32         ckpt     = 128;
     bool        writes   = true;
     fw::Variant variant  = fw::kBuggy;
     std::string out;
@@ -154,6 +174,18 @@ Args parse(int argc, char** argv, int first) {
             a.fifo = (u32)std::strtoul(argv[++i], 0, 10);
         } else if (opt == "--slices" && has_value) {
             a.slices = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--at" && has_value) {
+            a.at     = std::strtoull(argv[++i], 0, 10);
+            a.has_at = true;
+        } else if (opt == "--walk" && has_value) {
+            a.walk = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--stride" && has_value) {
+            a.stride = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--checkpoints" && has_value) {
+            a.ckpt = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--find-consumed" && has_value) {
+            a.find     = (u32)std::strtoul(argv[++i], 0, 10);
+            a.has_find = true;
         } else if (opt == "--out" && has_value) {
             a.out = argv[++i];
         } else if (opt == "--save" && has_value) {
@@ -357,6 +389,89 @@ int cmd_replay(const Args& a) {
     return 0;
 }
 
+bool consumed_at_least(const rwhost::Snapshot& snap, void* ctx) {
+    return snap.fw.consumed >= *static_cast<const u32*>(ctx);
+}
+
+void print_snapshot_header() {
+    std::printf("%9s  %9s  %7s  %8s  %8s  %5s  %5s  %10s\n",
+                "event", "cycle", "iter", "pending", "consumed", "head",
+                "tail", "checksum");
+}
+
+void print_snapshot(const rwhost::Snapshot& s) {
+    std::printf("%9zu  %9llu  %7u  %8u  %8u  %5u  %5u  0x%08X\n",
+                s.event_index, (unsigned long long)s.ts, s.main_iter,
+                s.fw.pending, s.fw.consumed, s.fw.head, s.fw.tail,
+                s.fw.checksum);
+}
+
+// Reverse execution: go to a point in the recorded run and read the
+// firmware's state there, then walk backwards from it.
+int cmd_inspect(const Args& a) {
+    if (a.file.empty()) {
+        std::fprintf(stderr, "rewind: inspect needs a trace file\n");
+        return 2;
+    }
+    std::vector<rwd::u8> trace;
+    if (!read_file(a.file.c_str(), &trace)) {
+        return 1;
+    }
+
+    rwhost::Timeline timeline;
+    if (!timeline.open(trace, a.iters, a.ckpt)) {
+        std::fprintf(stderr, "rewind: %s\n", timeline.error().c_str());
+        return 1;
+    }
+
+    std::printf("%zu events, %zu checkpoints\n\n",
+                timeline.event_count(), timeline.checkpoints());
+
+    rwhost::Snapshot snap;
+
+    if (a.has_find) {
+        u32 target = a.find;
+        if (!timeline.find_first(&consumed_at_least, &target, &snap)) {
+            std::printf("the firmware never consumed %u bytes in this run.\n",
+                        a.find);
+            return 1;
+        }
+        std::printf("first consumed %u bytes at event %zu, "
+                    "found in %u seeks\n\n",
+                    a.find, snap.event_index, timeline.last_search_seeks());
+    } else {
+        const std::size_t target =
+            a.has_at ? (std::size_t)a.at : timeline.event_count();
+        if (!timeline.seek(target, &snap)) {
+            std::fprintf(stderr, "rewind: %s\n", timeline.error().c_str());
+            return 1;
+        }
+    }
+
+    print_snapshot_header();
+    print_snapshot(snap);
+
+    // Walking backwards. Nothing is undone -- each line is a fresh replay
+    // from the nearest checkpoint to an earlier point in the same run.
+    const u32 stride = a.stride ? a.stride : 1u;
+    for (u32 step = 0; step < a.walk; ++step) {
+        if (timeline.position() == 0) {
+            break;
+        }
+        if (!timeline.step_back(stride, &snap)) {
+            std::fprintf(stderr, "rewind: %s\n", timeline.error().c_str());
+            return 1;
+        }
+        print_snapshot(snap);
+    }
+
+    if (a.walk > 0) {
+        std::printf("\n%llu events replayed to produce that.\n",
+                    (unsigned long long)timeline.events_replayed());
+    }
+    return 0;
+}
+
 int cmd_dump(const Args& a) {
     if (a.file.empty()) {
         std::fprintf(stderr, "rewind: dump needs a trace file\n");
@@ -440,6 +555,7 @@ int main(int argc, char** argv) {
     if (command == "replay") return cmd_replay(args);
     if (command == "dump")   return cmd_dump(args);
     if (command == "sizing") return cmd_sizing(args);
+    if (command == "inspect") return cmd_inspect(args);
 
     std::fprintf(stderr, "rewind: unknown command '%s'\n", command.c_str());
     return usage();

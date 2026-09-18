@@ -52,6 +52,26 @@ public:
     const std::string& divergence() const { return divergence_; }
     bool diverged() const { return !divergence_.empty(); }
 
+    // Called at the moment a chosen event is about to be served. The
+    // Timeline uses it to snapshot firmware state at an exact point.
+    typedef void (*CaptureFn)(void* ctx);
+
+    // Fires `fn` immediately before event `index` is served -- that is, in
+    // the instant the event is about to happen, with the firmware still in
+    // the state that preceded it. Asking "what did `pending` look like when
+    // that interrupt arrived?" wants the state before, not after.
+    void set_capture_point(std::size_t index, CaptureFn fn, void* ctx);
+    void clear_capture_point();
+    bool captured() const { return captured_; }
+
+    // Repositions the cursor, for resuming from a checkpoint. Clears any
+    // latched divergence, since a restored run has not diverged yet.
+    void set_cursor(std::size_t cursor, u64 now);
+
+    // Events served across the whole life of this object. The measure of how
+    // much work reverse navigation actually costs.
+    u64 events_served() const { return events_served_; }
+
     std::size_t cursor() const { return cursor_; }
     std::size_t event_count() const { return events_.size(); }
     const std::vector<rwd::Event>& events() const { return events_; }
@@ -62,6 +82,7 @@ private:
     void write32(u32 addr, u32 value);
     u32  poll_irq();
     void diverge(const char* fmt, ...);
+    void maybe_capture();
 
     static u32  s_read32(void* ctx, u32 addr);
     static void s_write32(void* ctx, u32 addr, u32 value);
@@ -76,6 +97,11 @@ private:
     std::vector<rwd::Event> events_;
     std::size_t                cursor_;
     u64                        now_;
+    std::size_t                capture_at_;
+    CaptureFn                  capture_fn_;
+    void*                      capture_ctx_;
+    bool                       captured_;
+    u64                        events_served_;
     bool                       check_writes_;
     std::string                error_;
     std::string                divergence_;

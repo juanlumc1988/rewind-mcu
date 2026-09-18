@@ -164,6 +164,18 @@ The device can also see it at the time: `Recorder::healthy()` is false,
 buffer came to coping. `rewind sizing` sweeps capacities and reports all
 three.
 
+## Reverse execution
+
+Covered in its own document -- see `reverse-execution.md`. The short version:
+replay is deterministic, so moving backwards is re-executing to an earlier
+point, and checkpoints make it affordable. Because bare-metal state is small
+and explicit, a checkpoint is a struct copy rather than a `fork()`.
+
+The one constraint it places on this model is where checkpoints may be taken:
+between main-loop iterations, where no call is in progress and the interrupt
+mask is balanced. Those are the points at which a data-only snapshot is a
+complete description of the run.
+
 ## State that is not recorded
 
 The firmware's RAM is not in the trace. Replay reconstructs it by

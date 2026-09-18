@@ -7,10 +7,11 @@ on your workstation, with no hardware and no simulator involved. A failure
 that happens once a week in the field becomes a file you can reproduce on
 demand.
 
-**Status: milestone 1.** Record and replay work end to end, and the
-device-side path — ring buffer, drain loop, cycle-counter extension, Cortex-M
-backend — is written and tested on the host. Nothing has run on real silicon
-yet; see [What this does not do yet](#what-this-does-not-do-yet).
+**Status: milestone 2.** Record, replay and reverse execution work end to
+end, and the device-side path — ring buffer, drain loop, cycle-counter
+extension, Cortex-M backend — is written and tested on the host. Nothing has
+run on real silicon yet; see
+[What this does not do yet](#what-this-does-not-do-yet).
 
 ## The problem
 
@@ -82,6 +83,81 @@ g_state.pending = 0;       // BUG: erases anything the ISR added
 g_state.pending -= n;      // what it should be, under a critical section
 ```
 
+## Going backwards
+
+Replay is deterministic, so the state at event N is a pure function of the
+trace and N. Going backwards is therefore not undoing anything — it is
+re-executing to an earlier point. Checkpoints make that affordable.
+
+Take the failure above. The firmware consumed 23 bytes of 24, and we want
+the moment it lost one. Bisect to when it had consumed 19:
+
+```console
+$ rewind inspect bug.rwd --find-consumed 19
+6095 events, 47 checkpoints
+first consumed 19 bytes at event 2083, found in 15 seeks
+```
+
+Fifteen seeks over six thousand events. Now step backwards through it:
+
+```console
+$ rewind inspect bug.rwd --at 2092 --walk 10
+    event      cycle     iter   pending  consumed   head   tail
+     2092       6216     2012         0        19      4      3
+     2091       6213     2011         0        19      4      3
+     2090       6210     2010         0        19      4      3
+     2089       6207     2009         0        19      4      3
+     2088       6204     2008         0        19      4      3   <-- pending = 0
+     2087       6201     2007         2        19      4      3   <-- ISR made it 2
+     2086       6198     2007         1        19      3      3
+     2085       6195     2007         1        19      3      3
+     2083       6192     2007         1        19      3      3
+     2082       6189     2006         1        18      3      2
+```
+
+Read it upwards, the way time runs. At event 2087 `pending` is 2 — the ISR
+has just taken byte 20 and incremented it. At 2088 it is 0, because the main
+loop reached `pending = 0` and erased that increment. From there on `head` is
+4 and `tail` is 3 forever: a byte sits in the ring that nothing will ever
+consume.
+
+That is the entire bug, in two consecutive lines, with the mechanism visible
+rather than inferred.
+
+### Why not fork()
+
+`rr` and UndoDB checkpoint with `fork()`, because the state of a general
+Linux process is large, opaque, and full of things you cannot copy by hand.
+Copy-on-write is the only affordable way to snapshot it.
+
+None of that applies here. The entire state of the system under replay is the
+firmware's static storage, the replay cursor, and the shim's own handful of
+scalars — no heap, no dynamic objects, nothing hidden. A checkpoint is a
+struct copy of a few dozen bytes: faster than `fork()`, portable off Linux,
+and debuggable.
+
+That is not a shortcut around the hard problem. It is the hard problem being
+genuinely easier in this domain. Bare-metal firmware has no private state by
+construction, which is exactly the property that makes reverse execution
+cheap here and expensive everywhere else.
+
+What a struct copy cannot capture is the call stack, so checkpoints are taken
+between main-loop iterations, where no call is in progress and the interrupt
+mask is balanced. Landing on an exact event means replaying forward from the
+nearest checkpoint and snapshotting at the instant that event is about to be
+served.
+
+The saving is measurable rather than asserted — `--checkpoints` sets the
+interval, so you can watch it disappear:
+
+```console
+$ rewind inspect bug.rwd --at 2092 --walk 10
+7150 events replayed to produce that.
+
+$ rewind inspect bug.rwd --at 2092 --walk 10 --checkpoints 1000000
+29062 events replayed to produce that.
+```
+
 ## Architecture
 
 Two worlds, kept apart by the build system rather than by discipline.
@@ -92,8 +168,8 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `target/`   | HAL shim, recorder, cycle-counter extension, Cortex-M backend | C++98 |
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
-| `host/`     | Replay engine, session orchestration, CLI      | C++17 |
-| `tests/`    | 75 cases, 5.2 million assertions               | C++17 |
+| `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
+| `tests/`    | 88 cases, 5.2 million assertions               | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -258,9 +334,10 @@ Stated plainly, because the gap between this and the pitch is real:
   to land on, and will be reported as a divergence rather than replayed
   wrongly. Closing this needs the return address recorded alongside the
   vector and something to stop on it. It is the next real problem.
-- **No reverse execution.** The headline feature is still a design: replay is
-  deterministic, so `fork()`-based checkpoints give reverse-step cheaply, but
-  none of it is written.
+- **Reverse execution stops at iteration boundaries for checkpoints.** Seeks
+  land on an exact event, but a checkpoint can only be taken where no call is
+  in progress. Fine here; a firmware with a deeply nested main loop would
+  want finer granularity, which needs the call stack captured too.
 - **No transport.** `drain()` takes a function pointer and the tests feed it a
   simulated UART. No SWO, RTT or real UART driver ships here.
 - **No DMA.** The event type is designed and not implemented.
@@ -274,9 +351,8 @@ Stated plainly, because the gap between this and the pitch is real:
    where hardware actually did. This is what makes hardware traces replay.
 2. Run it on a part: a UART or RTT transport, and a measured overhead number
    held in CI.
-3. `fork()` checkpoints and reverse-step.
-4. DMA events.
-5. Qt timeline and two-trace diffing.
+3. DMA events.
+4. Qt timeline and two-trace diffing, over the navigation that now exists.
 
 ## License
 

@@ -29,7 +29,8 @@ const char* event_name(u8 type) {
 } // namespace
 
 ReplayHal::ReplayHal()
-    : cursor_(0), now_(0), check_writes_(false) {
+    : cursor_(0), now_(0), capture_at_(0), capture_fn_(0), capture_ctx_(0),
+      captured_(false), events_served_(0), check_writes_(false) {
     ops_.read32   = &ReplayHal::s_read32;
     ops_.write32  = &ReplayHal::s_write32;
     ops_.now      = &ReplayHal::s_now;
@@ -74,6 +75,36 @@ bool ReplayHal::load(const u8* data, std::size_t len) {
     return true;
 }
 
+void ReplayHal::set_capture_point(std::size_t index, CaptureFn fn, void* ctx) {
+    capture_at_  = index;
+    capture_fn_  = fn;
+    capture_ctx_ = ctx;
+    captured_    = false;
+}
+
+void ReplayHal::clear_capture_point() {
+    capture_fn_  = 0;
+    capture_ctx_ = 0;
+    captured_    = false;
+}
+
+void ReplayHal::set_cursor(std::size_t cursor, u64 now) {
+    cursor_ = cursor;
+    now_    = now;
+    divergence_.clear();
+    detail_[0] = '\0';
+}
+
+// Fires at the first point the cursor sits on the chosen event, whichever
+// access asks for it -- a read, a write or an interrupt poll. There is
+// exactly one such first point, so the capture is deterministic.
+void ReplayHal::maybe_capture() {
+    if (capture_fn_ != 0 && !captured_ && cursor_ == capture_at_) {
+        captured_ = true;
+        capture_fn_(capture_ctx_);
+    }
+}
+
 void ReplayHal::diverge(const char* fmt, ...) {
     if (!divergence_.empty()) {
         return;   // keep the first one; later ones are consequences
@@ -88,6 +119,8 @@ void ReplayHal::diverge(const char* fmt, ...) {
 }
 
 u32 ReplayHal::read32(u32 addr) {
+    maybe_capture();
+
     if (cursor_ >= events_.size()) {
         diverge("read of 0x%08X past the end of the recording "
                 "(%zu events consumed)", addr, cursor_);
@@ -114,11 +147,14 @@ u32 ReplayHal::read32(u32 addr) {
     }
 
     ++cursor_;
+    ++events_served_;
     now_ = ev.ts;
     return ev.value;
 }
 
 void ReplayHal::write32(u32 addr, u32 value) {
+    maybe_capture();
+
     if (!check_writes_) {
         // Writes were not recorded, so there is nothing to check against.
         // The replay is still correct -- writes are output, not input -- it
@@ -151,10 +187,13 @@ void ReplayHal::write32(u32 addr, u32 value) {
     }
 
     ++cursor_;
+    ++events_served_;
     now_ = ev.ts;
 }
 
 u32 ReplayHal::poll_irq() {
+    maybe_capture();
+
     if (cursor_ >= events_.size()) {
         return rwd::kNoIrq;
     }
@@ -164,6 +203,7 @@ u32 ReplayHal::poll_irq() {
     }
 
     ++cursor_;
+    ++events_served_;
     now_ = ev.ts;
     return ev.addr;   // vector number
 }

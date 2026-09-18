@@ -117,6 +117,10 @@ const State& rx_pump_state() {
     return g_state;
 }
 
+void rx_pump_restore(const State& state) {
+    g_state = state;
+}
+
 u64 rx_pump_state_hash() {
     u64 h = 14695981039346656037ULL;
     for (u32 i = 0; i < kRingSize; ++i) {

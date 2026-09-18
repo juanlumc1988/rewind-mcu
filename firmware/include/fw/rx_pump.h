@@ -57,6 +57,19 @@ void rx_pump_run(Variant variant, rwd::u32 main_iters);
 
 const State& rx_pump_state();
 
+// Overwrites the firmware's state wholesale.
+//
+// This is what makes reverse execution cheap. Restoring a checkpoint in a
+// general-purpose debugger means restoring a process -- which is why rr
+// forks. Here the entire state of the system under replay is this struct,
+// forty-odd bytes of it, because that is what bare-metal firmware is: no
+// heap, no dynamic objects, everything in static storage and visible from
+// the outside. Snapshotting it is a copy.
+//
+// Only meaningful between main-loop iterations, where no call is in
+// progress and the shim's interrupt mask is balanced.
+void rx_pump_restore(const State& state);
+
 // FNV-1a over every field, field by field rather than over the struct, so
 // padding bytes cannot make two identical states hash differently.
 rwd::u64 rx_pump_state_hash();
