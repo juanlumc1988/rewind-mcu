@@ -118,6 +118,12 @@ void mmio_write32(u32 addr, u32 value) {
     pump_irqs();
 }
 
+void hal_record_irq_entry(u32 vector) {
+    if (g_mode == MODE_RECORD && g_writer != 0 && g_ops != 0 && g_ops->now != 0) {
+        g_writer->irq_enter(g_ops->now(g_ops->ctx), vector);
+    }
+}
+
 u64 hal_now() {
     if (g_ops == 0 || g_ops->now == 0) {
         return 0;

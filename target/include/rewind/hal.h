@@ -74,6 +74,25 @@ Mode hal_mode();
 u32  mmio_read32(u32 addr);
 void mmio_write32(u32 addr, u32 value);
 
+// Records an interrupt entry from inside a real ISR prologue. No-op unless
+// recording.
+//
+// On hardware the shim does not dispatch interrupts -- the NVIC does, and it
+// does so at any instruction boundary. So a real ISR calls this itself, and
+// HalOps::poll_irq returns kNoIrq forever.
+//
+// Under MODE_REPLAY the relationship inverts: poll_irq serves EV_IRQ_ENTER
+// out of the trace and the shim dispatches, because there is no NVIC to do
+// it. This is the model's central approximation and its central limitation:
+// replay can only re-enter a handler after an MMIO access, whereas hardware
+// could have entered it anywhere. A trace recorded on silicon whose
+// interrupt landed mid-computation has no replayable point to land on, and
+// will be reported as a divergence rather than replayed wrongly.
+//
+// Closing that gap needs the return address recorded alongside the vector
+// and something to stop on it. It is the next real problem, not a detail.
+void hal_record_irq_entry(u32 vector);
+
 // Instrumentation only. Under MODE_REPLAY this reports the timestamp of the
 // last consumed event, which tracks the recorded clock at every MMIO access
 // but not between them. Firmware that needs the time must read its timer

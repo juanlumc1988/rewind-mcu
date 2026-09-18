@@ -31,6 +31,7 @@ int usage() {
         "                [--no-writes] --out FILE\n"
         "  rewind replay FILE [--iters N]\n"
         "  rewind dump   FILE [--limit N]\n"
+        "  rewind sizing [--seed N] [--drain N] [--fifo N] [--slices N]\n"
         "\n"
         "common options:\n"
         "  --seed N      simulator seed; picks the interrupt arrival schedule\n"
@@ -40,7 +41,15 @@ int usage() {
         "  --iters N     main-loop iterations (default 6000). Must match the\n"
         "                recording when replaying.\n"
         "  --no-writes   omit MMIO writes from the trace: smaller, but replay\n"
-        "                loses its consistency check\n");
+        "                loses its consistency check\n"
+        "\n"
+        "sizing options:\n"
+        "  --drain N     bytes moved from the ring per pass through the main\n"
+        "                loop (default 4096)\n"
+        "  --fifo N      how many bytes the transport accepts per call; model\n"
+        "                a UART FIFO with 4 or 8 (default: unlimited)\n"
+        "  --slices N    drains per run (default 60). Fewer means the main\n"
+        "                loop is busier and the ring has to hold more.\n");
     return 2;
 }
 
@@ -108,6 +117,9 @@ struct Args {
     u32         tx       = 24;
     u32         iters    = 6000;
     u32         limit    = 0;
+    u32         drain    = 4096;
+    u32         fifo     = 0xFFFFFFFFu;
+    u32         slices   = 60;
     bool        writes   = true;
     fw::Variant variant  = fw::kBuggy;
     std::string out;
@@ -136,6 +148,12 @@ Args parse(int argc, char** argv, int first) {
             a.iters = (u32)std::strtoul(argv[++i], 0, 10);
         } else if (opt == "--limit" && has_value) {
             a.limit = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--drain" && has_value) {
+            a.drain = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--fifo" && has_value) {
+            a.fifo = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--slices" && has_value) {
+            a.slices = (u32)std::strtoul(argv[++i], 0, 10);
         } else if (opt == "--out" && has_value) {
             a.out = argv[++i];
         } else if (opt == "--save" && has_value) {
@@ -225,6 +243,58 @@ int cmd_hunt(const Args& a) {
     } else {
         std::printf("pass --save FILE to keep the first failing trace.\n");
     }
+    return 0;
+}
+
+// How big does the ring buffer on the device need to be?
+//
+// Sweeps power-of-two capacities and reports peak occupancy and losses. The
+// answer is the smallest capacity that loses nothing, with headroom -- and
+// the high-water column says how much headroom you are actually buying.
+int cmd_sizing(const Args& a) {
+    rwhost::BufferedConfig cfg;
+    cfg.run           = to_config(a);
+    cfg.drain_budget  = a.drain;
+    cfg.link_per_call = a.fifo;
+    cfg.slices        = a.slices;
+
+    std::printf("seed %llu, draining %u bytes per pass, %u passes",
+                (unsigned long long)a.seed, a.drain, a.slices);
+    if (a.fifo != 0xFFFFFFFFu) {
+        std::printf(", transport takes %u bytes per call", a.fifo);
+    }
+    std::printf("\n\n%10s  %10s  %11s  %12s  %s\n",
+                "ring", "high water", "blocks lost", "bytes lost", "verdict");
+
+    u32 smallest_safe = 0;
+    for (u32 capacity = 128; capacity <= 65536u; capacity *= 2u) {
+        cfg.ring_capacity = capacity;
+        const rwhost::BufferedResult r = rwhost::record_buffered(cfg);
+        if (!r.began) {
+            std::fprintf(stderr, "rewind: could not start recorder at %u bytes\n",
+                         capacity);
+            return 1;
+        }
+
+        const bool safe = r.healthy;
+        if (safe && smallest_safe == 0) {
+            smallest_safe = capacity;
+        }
+        std::printf("%10u  %10u  %11u  %12llu  %s\n",
+                    capacity, r.high_water, r.blocks_lost,
+                    (unsigned long long)r.bytes_lost,
+                    safe ? "ok" : "LOSES DATA");
+    }
+
+    if (smallest_safe == 0) {
+        std::printf("\nNothing in this range kept up. Drain more often, or\n"
+                    "record fewer events -- try --no-writes.\n");
+        return 1;
+    }
+    std::printf("\nSmallest ring that loses nothing: %u bytes.\n", smallest_safe);
+    std::printf("Ship more than that: this is one seed, and the arrival\n"
+                "pattern that overruns it is by definition the one you did\n"
+                "not test.\n");
     return 0;
 }
 
@@ -369,6 +439,7 @@ int main(int argc, char** argv) {
     if (command == "record") return cmd_record(args);
     if (command == "replay") return cmd_replay(args);
     if (command == "dump")   return cmd_dump(args);
+    if (command == "sizing") return cmd_sizing(args);
 
     std::fprintf(stderr, "rewind: unknown command '%s'\n", command.c_str());
     return usage();

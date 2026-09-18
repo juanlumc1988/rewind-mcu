@@ -67,11 +67,16 @@ add_library(rewind_core STATIC
     core/src/varint.cpp
     core/src/crc32.cpp
     core/src/trace_writer.cpp
-    core/src/trace_reader.cpp)
+    core/src/trace_reader.cpp
+    core/src/ring_buffer.cpp)
 target_include_directories(rewind_core PUBLIC core/include)
 rewind_target_side(rewind_core)
 
-add_library(rewind_target STATIC target/src/hal.cpp)
+add_library(rewind_target STATIC
+    target/src/hal.cpp
+    target/src/clock.cpp
+    target/src/recorder.cpp
+    target/src/cortex_m.cpp)
 target_include_directories(rewind_target PUBLIC target/include)
 target_link_libraries(rewind_target PUBLIC rewind_core)
 rewind_target_side(rewind_target)
@@ -113,7 +118,10 @@ if(REWIND_BUILD_TESTS)
         tests/test_varint.cpp
         tests/test_crc32.cpp
         tests/test_trace.cpp
+        tests/test_ring_buffer.cpp
         tests/test_hal.cpp
+        tests/test_clock.cpp
+        tests/test_recorder.cpp
         tests/test_determinism.cpp)
     target_include_directories(rewind_tests PRIVATE tests/third_party)
     target_link_libraries(rewind_tests PRIVATE rewind_host)

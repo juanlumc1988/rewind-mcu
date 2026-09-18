@@ -26,6 +26,36 @@ replay. They are recorded anyway, under `kFlagRecordWrites`, because during
 replay they are exactly what proves the replay did not silently diverge.
 Clearing the flag halves the trace and loses that check.
 
+## Who dispatches an interrupt
+
+Record and replay differ here, and it is the sharpest edge in the design.
+
+**On hardware**, the NVIC dispatches. The shim is not consulted and cannot
+be: an interrupt arrives between two instructions of the compiler's choosing.
+So `HalOps::poll_irq` returns `kNoIrq` forever and each ISR announces itself
+by calling `hal_record_irq_entry(vector)` in its prologue.
+
+**On replay**, there is no NVIC, so the shim dispatches from the trace —
+`poll_irq` serves the next `EV_IRQ_ENTER` and the shim calls the handler.
+But the shim only gets to run at an MMIO access, so that is the only place
+an interrupt can be re-entered.
+
+The two do not line up, and the consequence is concrete: a trace recorded on
+silicon whose interrupt landed in the middle of a computation has no
+replayable point to land on. Replay reports a divergence. That is the right
+failure — it says "I cannot reproduce this" rather than reproducing
+something else — but it is a failure, and it is what stands between this
+working in simulation and working on a device.
+
+Closing it means recording where the interrupt actually landed, not just
+that it did: the return address from the exception frame, plus something on
+the host that can stop there. That is the next piece of real work.
+
+Under the simulator the question does not arise, because the simulator has
+no way to interrupt except through the shim. Traces recorded there replay
+exactly, which is why the golden tests pass and why they are not by
+themselves evidence that hardware traces will.
+
 ## Where interrupts land
 
 Real silicon can take an interrupt at almost any instruction boundary.
@@ -78,10 +108,20 @@ timestamp of the last consumed event, which tracks the recorded clock at
 every MMIO access but not between them. Firmware that needs the time must
 read its timer through `mmio_read32`, which is recorded and therefore exact.
 
-Timestamps must be monotonic. `DWT->CYCCNT` is 32 bits and wraps; the trace
-format expects 64, and extending one to the other is not yet written. The
-writer rejects a backwards timestamp rather than accepting a trace whose
-every subsequent delta would be wrong.
+Timestamps must be monotonic, and the writer rejects a backwards one rather
+than accepting a trace whose every subsequent delta would be wrong.
+
+`DWT->CYCCNT` is 32 bits and wraps every 25.6 seconds at 168 MHz, so
+`ClockExtender` widens it: a reading lower than the previous one means a
+wrap, so bump a high word. It is exact as long as sampling is more frequent
+than the wrap period, and every recorded MMIO access is a sample.
+
+Firmware that goes quiet for longer than a period — deep sleep, a long
+computation, a halted debugger — can skip a wrap, and the counter alone
+cannot distinguish one wrap from two: the evidence is identical. Nothing
+clever fixes that; it needs a second, slower clock. `suspicious()` counts
+sample gaps beyond half a period so the doubt is reported rather than
+buried.
 
 ## Divergence
 
@@ -93,6 +133,36 @@ everything after it is a consequence.
 Divergence is the tool's only honest failure mode. Any firmware change,
 build mismatch or model breakage shows up as one, which is why the replay
 engine checks aggressively rather than tolerating near-misses.
+
+## Losing data
+
+A device recording faster than its link can carry runs out of buffer. The
+design question is not how to avoid it — you cannot, in general — but what
+to do when it happens.
+
+Three options, and only one of them is honest:
+
+1. **Stop recording at the first loss.** The trace stays contiguous and
+   short. You lose everything after the first burst, which is usually the
+   part you wanted.
+2. **Drop and carry on silently.** The trace has a hole. Every surviving
+   block still passes its CRC, so it parses perfectly, and replay diverges
+   somewhere downstream for reasons that look exactly like a firmware bug.
+   This is the worst outcome available and the easiest one to implement.
+3. **Drop, carry on, and record that you did.** What `rewind` does.
+
+Each block carries a sequence number. A block the sink refuses is counted,
+the sequence still advances, and recording continues. A reader comparing
+sequence numbers sees the gap immediately, reports its size, and stops rather
+than decoding the next block's deltas against state that belongs to a block
+that never arrived.
+
+Four bytes per block against an afternoon of chasing a bug that is not there.
+
+The device can also see it at the time: `Recorder::healthy()` is false,
+`blocks_lost()` says how many, and `ring().high_water()` says how close the
+buffer came to coping. `rewind sizing` sweeps capacities and reports all
+three.
 
 ## State that is not recorded
 

@@ -76,6 +76,37 @@ struct ReplayResult {
     std::size_t events_total    = 0;
 };
 
+// Recording the way the device does it: through a ring buffer, with a
+// transport that drains it a chunk at a time from the main loop.
+struct BufferedConfig {
+    RunConfig run;
+    u32       ring_capacity = 8192;   // power of two
+    u32       drain_budget  = 4096;   // bytes moved per pass through the loop
+    u32       link_per_call = 0xFFFFFFFFu;   // transport FIFO depth
+    u32       slices        = 60;     // drains per run
+};
+
+struct BufferedResult {
+    std::vector<u8> trace;
+    FirmwareOutcome fw;
+
+    u32  blocks_lost = 0;
+    u32  ring_drops  = 0;
+    u64  bytes_lost  = 0;   // trace bytes the ring had no room for
+    u32  high_water  = 0;   // peak ring occupancy: what to size the buffer by
+    u32  events      = 0;
+    u32  tx_sent     = 0;
+    u32  tx_checksum = 0;
+    bool healthy     = false;
+    bool began       = false;
+
+    bool bug_triggered() const {
+        return fw.consumed != tx_sent || fw.checksum != tx_checksum;
+    }
+};
+
+BufferedResult record_buffered(const BufferedConfig& cfg);
+
 u64  build_id_for(fw::Variant variant);
 bool variant_for_build_id(u64 build_id, fw::Variant* out);
 

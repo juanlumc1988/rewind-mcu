@@ -34,6 +34,14 @@ public:
     bool at_end() const { return done_; }
     const char* error() const { return err_ ? err_ : ""; }
 
+    // Blocks read so far, and how many the sequence numbers say went
+    // missing before the reader stopped. A non-zero gap means the device
+    // could not drain its buffer fast enough -- the trace is not corrupt,
+    // it is incomplete, and those are different problems with different
+    // fixes.
+    u32 blocks_read() const { return blocks_read_; }
+    u32 blocks_lost() const { return blocks_lost_; }
+
 private:
     bool load_next_block();
     bool fail(const char* why);
@@ -46,6 +54,9 @@ private:
     u32         next_block_off_;
     u64         last_ts_;
     u32         last_addr_;
+    u32         expect_seq_;
+    u32         blocks_read_;
+    u32         blocks_lost_;
     bool        opened_;
     bool        done_;
     const char* err_;

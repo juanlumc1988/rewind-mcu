@@ -7,9 +7,10 @@ on your workstation, with no hardware and no simulator involved. A failure
 that happens once a week in the field becomes a file you can reproduce on
 demand.
 
-**Status: milestone 0.** The core works end to end and is covered by tests,
-entirely on the host. It has not run on real silicon yet — see
-[What this does not do yet](#what-this-does-not-do-yet).
+**Status: milestone 1.** Record and replay work end to end, and the
+device-side path — ring buffer, drain loop, cycle-counter extension, Cortex-M
+backend — is written and tested on the host. Nothing has run on real silicon
+yet; see [What this does not do yet](#what-this-does-not-do-yet).
 
 ## The problem
 
@@ -85,14 +86,14 @@ g_state.pending -= n;      // what it should be, under a critical section
 
 Two worlds, kept apart by the build system rather than by discipline.
 
-| Directory   | What                                        | Standard |
-|-------------|---------------------------------------------|----------|
-| `core/`     | Trace format: varint, CRC-32, writer, reader | C++98 |
-| `target/`   | The HAL shim — MMIO and interrupt interception | C++98 |
-| `sim/`      | A toy MCU: cycle counter, UART, GPIO         | C++98 |
-| `firmware/` | Example firmware, in buggy and fixed variants | C++98 |
-| `host/`     | Replay engine, session orchestration, CLI     | C++17 |
-| `tests/`    | 45 cases, 18 606 assertions                   | C++17 |
+| Directory   | What                                          | Standard |
+|-------------|-----------------------------------------------|----------|
+| `core/`     | Trace format: varint, CRC-32, writer, reader, ring buffer | C++98 |
+| `target/`   | HAL shim, recorder, cycle-counter extension, Cortex-M backend | C++98 |
+| `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
+| `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
+| `host/`     | Replay engine, session orchestration, CLI      | C++17 |
+| `tests/`    | 75 cases, 5.2 million assertions               | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -141,10 +142,11 @@ DIVERGED: read of 0x40000000 past the end of the recording
 
 ### Trace format
 
-A 32-byte header, then CRC-checked blocks of varint-packed events. Blocking
-means a trace cut short by a brown-out still yields every whole block that
-made it out, and the reader stops cleanly at the ragged tail instead of
-reporting garbage.
+A 32-byte header, then CRC-checked, sequence-numbered blocks of varint-packed
+events. Blocking means a trace cut short by a brown-out still yields every
+whole block that made it out, and the reader stops cleanly at the ragged tail
+instead of reporting garbage. The sequence number is what separates a *lost*
+block from a *corrupt* one — see [Losing data honestly](#losing-data-honestly).
 
 Timestamps and addresses are both stored as deltas. The address delta is
 ZigZag-coded and matters more than it looks: `0x40000000` costs five bytes in
@@ -157,33 +159,118 @@ The header carries a `build_id`. Replaying a trace against a different
 firmware build is the fastest way to spend an afternoon chasing a bug that is
 not there, so it is refused.
 
+## On the device
+
+`Recorder` is what firmware instantiates. It owns a `TraceWriter`, a
+`RingBuffer` and a `drain()` you call from the main loop's idle time:
+
+```cpp
+static rwd::Recorder recorder;
+static rwd::u8 ring[4096];        // sized by `rewind sizing`, see below
+static rwd::u8 block[256];
+
+rwd::cortex_m::enable_cycle_counter();
+rwd::hal_attach(hardware.ops());
+recorder.begin(ring, sizeof(ring), block, sizeof(block),
+               kBuildId, serial_number, rwd::kFlagRecordWrites);
+recorder.start();
+
+for (;;) {
+    do_the_actual_work();
+    recorder.drain(&uart_write, &uart, 256);
+}
+```
+
+No allocation anywhere: both buffers are the caller's, sized at link time.
+
+Recording happens in whatever context touched the peripheral — main loop or
+ISR — so a push can interrupt another push, and the sink masks interrupts
+around it. The masked window is a bounded copy of at most one block, no loops
+and no I/O.
+
+### Losing data honestly
+
+A device that records faster than its link can carry will eventually drop
+something. The design decision that matters is what it does then.
+
+Each block carries a sequence number. A refused block is counted, the
+sequence still advances, and recording continues — so a burst that overruns
+the buffer costs you that burst, not the rest of the run. When the trace is
+later read, the gap is visible:
+
+```console
+$ rewind replay short-buffer.rwd
+rewind: gap in trace: the device dropped blocks it could not drain in time
+```
+
+Rejected at load, before a single instruction of firmware runs. Without the
+sequence number this trace would parse perfectly — every surviving block has
+a valid CRC — and replay would diverge somewhere downstream, sending the
+investigation at the firmware instead of at the buffer.
+
+### Sizing the buffer
+
+```console
+$ rewind sizing --seed 7 --drain 512 --fifo 4
+      ring  high water  blocks lost    bytes lost  verdict
+       128          96          129         32535  LOSES DATA
+       512         508           10          2525  LOSES DATA
+      2048        1906            3           756  LOSES DATA
+      4096        2593            0             0  ok
+      8192        2593            0             0  ok
+
+Smallest ring that loses nothing: 4096 bytes.
+```
+
+High water is peak occupancy. Once it stops climbing, the buffer is bigger
+than the traffic needs and the rest is .bss you are paying for.
+
+### Timestamps
+
+`DWT->CYCCNT` is 32 bits and wraps every 25.6 seconds at 168 MHz.
+`ClockExtender` widens it to the 64 the format expects, by the obvious method
+— a reading lower than the last one means a wrap — which rests on being
+sampled more often than once per period. Every recorded MMIO access is a
+sample, so firmware that touches a peripheral even once a second has
+twenty-five times the margin it needs.
+
+Firmware that goes quiet for longer than a wrap period can still skip one,
+and the counter alone cannot tell one wrap from two. That is not fixable
+here, so `suspicious()` reports the doubt instead of hiding it.
+
 ## What this does not do yet
 
 Stated plainly, because the gap between this and the pitch is real:
 
-- **No hardware.** The shim is ready and the format is portable, but there is
-  no real MMIO backend, no transport (SWO/RTT/UART) and no on-target ring
-  buffer drain. Nothing here has run on silicon.
+- **Nothing has run on silicon.** `cortex_m.cpp` compiles under the same
+  strict rules as the rest and its register definitions come from the ARM
+  documentation, but it has not been executed on a part. Reviewed, not tested.
+- **Interrupt dispatch is the real gap.** On hardware the NVIC dispatches at
+  any instruction boundary, so a real ISR announces itself by calling
+  `hal_record_irq_entry()`. On replay there is no NVIC, so the shim
+  dispatches — and it can only do so after an MMIO access. A trace recorded
+  on silicon whose interrupt landed mid-computation has no replayable point
+  to land on, and will be reported as a divergence rather than replayed
+  wrongly. Closing this needs the return address recorded alongside the
+  vector and something to stop on it. It is the next real problem.
 - **No reverse execution.** The headline feature is still a design: replay is
   deterministic, so `fork()`-based checkpoints give reverse-step cheaply, but
   none of it is written.
-- **Interrupts land only at MMIO accesses.** Real silicon can interrupt at any
-  instruction boundary. This model is coarser — enough to catch the whole
-  class of bugs where an ISR lands inside a read-modify-write on shared
-  state, which is the class worth catching first, but not a complete model.
+- **No transport.** `drain()` takes a function pointer and the tests feed it a
+  simulated UART. No SWO, RTT or real UART driver ships here.
 - **No DMA.** The event type is designed and not implemented.
-- **No 32-bit clock wraparound handling.** `DWT->CYCCNT` wraps; extending it
-  to the 64 bits the format expects is not written.
 - **No GUI.** Timeline scrubbing and trace diffing are the eventual Qt layer.
 - **Overhead is unmeasured.** The <2% target is a design goal with no number
-  behind it yet.
+  behind it yet, and it cannot get one without hardware.
 
 ## Roadmap
 
-1. Real MMIO backend plus an on-target ring buffer and a UART drain.
-2. Measure the recording overhead on hardware and hold it in CI.
+1. Record the interrupt return address, so replay can re-enter a handler
+   where hardware actually did. This is what makes hardware traces replay.
+2. Run it on a part: a UART or RTT transport, and a measured overhead number
+   held in CI.
 3. `fork()` checkpoints and reverse-step.
-4. DMA events and clock extension.
+4. DMA events.
 5. Qt timeline and two-trace diffing.
 
 ## License

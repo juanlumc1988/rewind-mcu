@@ -8,7 +8,8 @@ namespace rwd {
 
 TraceReader::TraceReader()
     : data_(0), len_(0), block_end_(0), pos_(0), next_block_off_(0),
-      last_ts_(0), last_addr_(0), opened_(false), done_(false), err_(0) {
+      last_ts_(0), last_addr_(0), expect_seq_(0), blocks_read_(0),
+      blocks_lost_(0), opened_(false), done_(false), err_(0) {
     hdr_.magic    = 0;
     hdr_.version  = 0;
     hdr_.flags    = 0;
@@ -50,6 +51,9 @@ bool TraceReader::open(const u8* data, u32 len) {
     next_block_off_ = kTraceHeaderSize;
     last_ts_        = 0;
     last_addr_      = 0;
+    expect_seq_     = 0;
+    blocks_read_    = 0;
+    blocks_lost_    = 0;
     opened_         = true;
     done_           = false;
     return true;
@@ -69,19 +73,53 @@ bool TraceReader::load_next_block() {
         return false;
     }
 
-    const u32 payload_off = next_block_off_ + 4;
-    // Checked in two steps so the sum cannot wrap on a hostile length.
-    if (payload_len > len_ - payload_off || len_ - payload_off - payload_len < 4) {
+    // Each step is checked against the remaining length rather than summed,
+    // so a hostile payload_len cannot wrap the arithmetic into a pass.
+    u32 remaining = len_ - next_block_off_ - 4;
+    if (remaining < 4) {
         done_ = true;
         return fail("truncated block: trace ends mid-block");
     }
+    const u32 seq_off = next_block_off_ + 4;
 
+    remaining -= 4;
+    if (payload_len > remaining || remaining - payload_len < 4) {
+        done_ = true;
+        return fail("truncated block: trace ends mid-block");
+    }
+    const u32 payload_off = seq_off + 4;
+
+    u32 crc = crc32_update(crc32_init(), data_ + seq_off, 4);
+    crc     = crc32_update(crc, data_ + payload_off, payload_len);
     const u32 want = get_u32_le(data_ + payload_off + payload_len);
-    const u32 got  = crc32(data_ + payload_off, payload_len);
-    if (want != got) {
+    if (want != crc32_final(crc)) {
         done_ = true;
         return fail("block CRC mismatch: trace is corrupt");
     }
+
+    const u32 seq = get_u32_le(data_ + seq_off);
+    if (seq != expect_seq_) {
+        // Sequence numbers only ever move forwards. Going backwards means
+        // two traces were spliced together, or blocks arrived out of order
+        // on a transport that promised it would not do that.
+        if (seq < expect_seq_) {
+            done_ = true;
+            return fail("block sequence went backwards: trace is not a "
+                        "single recording");
+        }
+        // Forwards: the device dropped blocks it could not drain. Every
+        // event after this point belongs to a different moment than the
+        // reader would otherwise assume, and timestamp and address deltas
+        // are both relative -- so continuing would not merely skip data, it
+        // would decode the remainder wrongly.
+        blocks_lost_ = seq - expect_seq_;
+        done_        = true;
+        return fail("gap in trace: the device dropped blocks it could not "
+                    "drain in time");
+    }
+
+    expect_seq_ = seq + 1u;
+    ++blocks_read_;
 
     pos_            = payload_off;
     block_end_      = payload_off + payload_len;

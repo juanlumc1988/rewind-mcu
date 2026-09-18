@@ -16,13 +16,23 @@
 //
 //   Blocks, repeated until a terminator
 //     u32  payload_len    little-endian; 0 terminates the stream
+//     u32  seq            little-endian; counts from 0, never reused
 //     u8   payload[payload_len]
-//     u32  crc32          little-endian, over payload only
+//     u32  crc32          little-endian, over seq and payload
 //
 // Blocking exists so a trace stays usable when it is cut short: a device
 // that browns out mid-transmission leaves whole, CRC-checked blocks behind
 // and one ragged tail, and the reader stops cleanly at the tail rather than
 // reporting garbage.
+//
+// `seq` is what makes a LOST block different from a corrupt one, and the
+// distinction is the whole reason it is here. A device recording faster than
+// it can drain its buffer drops whole blocks. Without a sequence number the
+// trace still parses -- every surviving block has a valid CRC -- and replay
+// then diverges somewhere downstream, for reasons that look like a firmware
+// bug and are not. With it, the reader sees the gap immediately and says so.
+// Four bytes per block, against a class of failure that would otherwise cost
+// an afternoon.
 //
 // Events inside a payload, each a type byte followed by varints:
 //   EV_MMIO_READ   delta_ts, delta_addr, value
@@ -58,8 +68,11 @@ namespace rwd {
 
 // Stored little-endian, so byte 0 is 'R' (0x52) and byte 3 is 'D' (0x44).
 const u32 kTraceMagic      = 0x444E5752u;
-const u16 kTraceVersion    = 1;
+const u16 kTraceVersion    = 2;
 const u32 kTraceHeaderSize = 32;
+
+// Per-block framing overhead: payload_len + seq + crc32.
+const u32 kBlockOverhead = 12;
 
 enum EventType {
     EV_MMIO_READ  = 0x01,

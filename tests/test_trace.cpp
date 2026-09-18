@@ -81,24 +81,40 @@ Recorded make_trace(u32 count, u32 block_bytes = kTinyBlock,
     return out;
 }
 
-// Walks the block framing without decoding events.
-u32 count_blocks(const std::vector<u8>& trace) {
-    u32 blocks = 0;
-    u32 off    = rwd::kTraceHeaderSize;
+// Byte range of each block's frame, header word included, in order.
+struct Span {
+    u32 off;
+    u32 len;   // whole frame: payload_len + seq + payload + crc
+};
+
+std::vector<Span> block_spans(const std::vector<u8>& trace) {
+    std::vector<Span> spans;
+    u32 off = rwd::kTraceHeaderSize;
     while (off + 4u <= trace.size()) {
-        const u32 len = rwd::get_u32_le(trace.data() + off);
-        if (len == 0) {
+        const u32 payload_len = rwd::get_u32_le(trace.data() + off);
+        if (payload_len == 0) {
             break;
         }
-        ++blocks;
-        off += 4u + len + 4u;
+        Span span;
+        span.off = off;
+        span.len = rwd::kBlockOverhead + payload_len;
+        if (span.off + span.len > trace.size()) {
+            break;
+        }
+        spans.push_back(span);
+        off += span.len;
     }
-    return blocks;
+    return spans;
 }
 
-// Offset of the first payload byte of the first block.
+u32 count_blocks(const std::vector<u8>& trace) {
+    return (u32)block_spans(trace).size();
+}
+
+// Offset of the first payload byte of the first block, past payload_len
+// and seq.
 u32 first_payload_offset() {
-    return rwd::kTraceHeaderSize + 4u;
+    return rwd::kTraceHeaderSize + 8u;
 }
 
 } // namespace
@@ -279,7 +295,9 @@ TEST_CASE("writer refuses a buffer too small for a worst-case event") {
     CHECK_FALSE(writer.begin(&rwhost::VectorSink::write, &sink, block,
                              rwd::kMinBlockBuffer - 1u, 0, 0, 0));
     CHECK_FALSE(writer.ok());
-    CHECK(rwd::kMinBlockBuffer >= rwd::kMaxEventBytes);
+    // The buffer has to hold the 12-byte frame and still fit a worst-case
+    // event in what is left.
+    CHECK(rwd::kMinBlockBuffer >= rwd::kBlockOverhead + rwd::kMaxEventBytes);
 }
 
 TEST_CASE("writer latches an error on a non-monotonic timestamp") {
@@ -332,4 +350,117 @@ TEST_CASE("an empty trace is well formed") {
     CHECK_FALSE(reader.next(&ev));
     CHECK(reader.ok());
     CHECK(reader.at_end());
+}
+
+
+TEST_CASE("blocks are numbered from zero, without gaps") {
+    const Recorded          rec   = make_trace(400);
+    const std::vector<Span> spans = block_spans(rec.bytes);
+    REQUIRE(spans.size() > 10u);
+
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        CAPTURE(i);
+        CHECK(rwd::get_u32_le(rec.bytes.data() + spans[i].off + 4u) == (u32)i);
+    }
+
+    rwd::TraceReader reader;
+    REQUIRE(reader.open(rec.bytes.data(), (u32)rec.bytes.size()));
+    rwd::Event ev;
+    while (reader.next(&ev)) {
+    }
+    CHECK(reader.ok());
+    CHECK(reader.blocks_lost() == 0u);
+    CHECK(reader.blocks_read() == spans.size());
+}
+
+TEST_CASE("a dropped block is reported as a gap, not decoded around") {
+    // The failure this exists for: a device recording faster than it can
+    // drain loses whole blocks. Every surviving block still has a valid CRC,
+    // so without the sequence number the trace parses cleanly and replay
+    // diverges later for reasons that look like a firmware bug.
+    const Recorded          full  = make_trace(400);
+    const std::vector<Span> spans = block_spans(full.bytes);
+    REQUIRE(spans.size() > 6u);
+
+    const Span& dropped = spans[3];
+    std::vector<u8> holed(full.bytes.begin(), full.bytes.begin() + (long)dropped.off);
+    holed.insert(holed.end(),
+                 full.bytes.begin() + (long)(dropped.off + dropped.len),
+                 full.bytes.end());
+
+    rwd::TraceReader reader;
+    REQUIRE(reader.open(holed.data(), (u32)holed.size()));
+
+    rwd::Event ev;
+    u32        seen = 0;
+    while (reader.next(&ev)) {
+        ++seen;
+    }
+
+    CHECK(seen > 0u);                 // blocks before the hole are fine
+    CHECK_FALSE(reader.ok());         // and the hole itself is reported
+    CHECK(reader.blocks_lost() == 1u);
+    CHECK(std::string(reader.error()).find("gap in trace") != std::string::npos);
+}
+
+TEST_CASE("the size of a gap is reported") {
+    const Recorded          full  = make_trace(600);
+    const std::vector<Span> spans = block_spans(full.bytes);
+    REQUIRE(spans.size() > 12u);
+
+    // Excise blocks 4, 5 and 6 in one contiguous cut.
+    const u32 from = spans[4].off;
+    const u32 to   = spans[6].off + spans[6].len;
+    std::vector<u8> holed(full.bytes.begin(), full.bytes.begin() + (long)from);
+    holed.insert(holed.end(), full.bytes.begin() + (long)to, full.bytes.end());
+
+    rwd::TraceReader reader;
+    REQUIRE(reader.open(holed.data(), (u32)holed.size()));
+    rwd::Event ev;
+    while (reader.next(&ev)) {
+    }
+    CHECK_FALSE(reader.ok());
+    CHECK(reader.blocks_lost() == 3u);
+}
+
+TEST_CASE("spliced traces are rejected") {
+    // Two recordings concatenated: the second one's blocks start again at
+    // zero, so the sequence goes backwards.
+    const Recorded a = make_trace(120);
+    const Recorded b = make_trace(120);
+
+    const std::vector<Span> spans_a = block_spans(a.bytes);
+    REQUIRE(spans_a.size() > 3u);
+    const u32 cut = spans_a[2].off + spans_a[2].len;
+
+    std::vector<u8> spliced(a.bytes.begin(), a.bytes.begin() + (long)cut);
+    spliced.insert(spliced.end(),
+                   b.bytes.begin() + (long)rwd::kTraceHeaderSize, b.bytes.end());
+
+    rwd::TraceReader reader;
+    REQUIRE(reader.open(spliced.data(), (u32)spliced.size()));
+    rwd::Event ev;
+    while (reader.next(&ev)) {
+    }
+    CHECK_FALSE(reader.ok());
+    CHECK(std::string(reader.error()).find("backwards") != std::string::npos);
+}
+
+TEST_CASE("the CRC covers the sequence number") {
+    // Otherwise a corrupted seq would masquerade as a gap, sending someone
+    // to look at buffer sizing when the real problem is the link.
+    Recorded                rec   = make_trace(200);
+    const std::vector<Span> spans = block_spans(rec.bytes);
+    REQUIRE(spans.size() > 3u);
+
+    rwd::put_u32_le(rec.bytes.data() + spans[2].off + 4u, 9999u);
+
+    rwd::TraceReader reader;
+    REQUIRE(reader.open(rec.bytes.data(), (u32)rec.bytes.size()));
+    rwd::Event ev;
+    while (reader.next(&ev)) {
+    }
+    CHECK_FALSE(reader.ok());
+    CHECK(std::string(reader.error()).find("CRC") != std::string::npos);
+    CHECK(reader.blocks_lost() == 0u);
 }

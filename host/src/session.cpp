@@ -3,6 +3,7 @@
 
 #include "rewind/session.h"
 
+#include "rewind/recorder.h"
 #include "sim/mcu.h"
 
 namespace rwhost {
@@ -25,6 +26,77 @@ FirmwareOutcome snapshot() {
 }
 
 } // namespace
+
+namespace {
+
+// Stands in for a UART: accepts at most `per_call` bytes at a time, the way
+// a hardware FIFO would.
+struct Link {
+    std::vector<u8> received;
+    u32             per_call;
+
+    Link() : per_call(0xFFFFFFFFu) {}
+
+    static u32 write(void* ctx, const u8* data, u32 len) {
+        Link*     self  = static_cast<Link*>(ctx);
+        const u32 taken = (len < self->per_call) ? len : self->per_call;
+        self->received.insert(self->received.end(), data, data + taken);
+        return taken;
+    }
+};
+
+} // namespace
+
+BufferedResult record_buffered(const BufferedConfig& cfg) {
+    BufferedResult result;
+
+    sim::Mcu        mcu(cfg.run.seed, cfg.run.tx_total);
+    rwd::Recorder   recorder;
+    std::vector<u8> ring(cfg.ring_capacity);
+    std::vector<u8> block(kBlockBufferBytes);
+    Link            link;
+    link.per_call = cfg.link_per_call;
+
+    rwd::hal_reset();
+    fw::rx_pump_reset();
+    fw::rx_pump_install();
+    rwd::hal_attach(mcu.ops());
+
+    if (!recorder.begin(ring.data(), cfg.ring_capacity, block.data(),
+                        kBlockBufferBytes, build_id_for(cfg.run.variant),
+                        cfg.run.seed, cfg.run.flags)) {
+        rwd::hal_reset();
+        return result;
+    }
+    result.began = true;
+    recorder.start();
+
+    // Execution interleaved with draining, as a main loop would do it.
+    const u32 slices    = cfg.slices ? cfg.slices : 1u;
+    const u32 per_slice = cfg.run.main_iters / slices;
+    for (u32 slice = 0; slice < slices; ++slice) {
+        fw::rx_pump_run(cfg.run.variant, per_slice);
+        recorder.drain(&Link::write, &link, cfg.drain_budget);
+    }
+
+    recorder.stop(rwd::hal_now());
+    while (recorder.drain(&Link::write, &link, 0xFFFFu) > 0) {
+    }
+
+    result.trace       = link.received;
+    result.fw          = snapshot();
+    result.blocks_lost = recorder.blocks_lost();
+    result.ring_drops  = recorder.ring().drops();
+    result.bytes_lost  = recorder.ring().bytes_dropped();
+    result.high_water  = recorder.ring().high_water();
+    result.events      = recorder.writer().events();
+    result.healthy     = recorder.healthy();
+    result.tx_sent     = mcu.tx_sent();
+    result.tx_checksum = mcu.tx_checksum();
+
+    rwd::hal_reset();
+    return result;
+}
 
 u64 build_id_for(fw::Variant variant) {
     return (variant == fw::kFixed) ? kBuildIdFixed : kBuildIdBuggy;

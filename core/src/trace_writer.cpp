@@ -8,8 +8,12 @@ namespace rwd {
 
 TraceWriter::TraceWriter()
     : sink_(0), ctx_(0), buf_(0), cap_(0), used_(0), last_ts_(0),
-      last_addr_(0), events_(0), bytes_(0), flags_(0), ok_(false),
-      started_(false), finished_(false), err_(0) {}
+      last_addr_(0), block_seq_(0), blocks_lost_(0), events_(0), bytes_(0),
+      flags_(0), ok_(false), started_(false), finished_(false), err_(0) {}
+
+u32 TraceWriter::payload_cap() const {
+    return cap_ - kBlockOverhead;
+}
 
 void TraceWriter::fail(const char* why) {
     if (!err_) {
@@ -49,6 +53,8 @@ bool TraceWriter::begin(SinkFn sink, void* ctx, u8* buffer, u32 buf_len,
     used_      = 0;
     last_ts_   = 0;
     last_addr_ = 0;
+    block_seq_ = 0;
+    blocks_lost_ = 0;
     events_    = 0;
     bytes_   = 0;
     flags_   = flags;
@@ -75,19 +81,26 @@ bool TraceWriter::flush_block() {
         return ok_;
     }
 
-    u8 frame[4];
-    put_u32_le(frame, used_);
-    if (!emit(frame, 4)) {
-        return false;
-    }
-    if (!emit(buf_, used_)) {
-        return false;
-    }
-    put_u32_le(frame, crc32(buf_, used_));
-    if (!emit(frame, 4)) {
-        return false;
+    put_u32_le(buf_ + 0, used_);
+    put_u32_le(buf_ + 4, block_seq_);
+
+    // CRC covers seq and payload, so a block cannot be silently renumbered
+    // in transit.
+    const u32 crc = crc32(buf_ + 4, 4u + used_);
+    put_u32_le(buf_ + 8 + used_, crc);
+
+    const u32 total = kBlockOverhead + used_;
+    if (sink_(ctx_, buf_, total)) {
+        bytes_ += (u64)total;
+    } else {
+        // The sink could not take it. Losing this block is survivable; the
+        // sequence number still advances, so a reader sees a gap of exactly
+        // one rather than silently decoding the next block's deltas against
+        // this one's state.
+        ++blocks_lost_;
     }
 
+    ++block_seq_;
     used_ = 0;
     return true;
 }
@@ -95,13 +108,15 @@ bool TraceWriter::flush_block() {
 // Copies a staged event into the block buffer, flushing first if it will not
 // fit. cap_ >= kMinBlockBuffer >= kMaxEventBytes guarantees it fits after.
 bool TraceWriter::stage(const u8* bytes, u32 n) {
-    if (used_ + n > cap_) {
+    if (used_ + n > payload_cap()) {
         if (!flush_block()) {
             return false;
         }
     }
+    // Guaranteed to fit now: payload_cap() >= kMinBlockBuffer - kBlockOverhead
+    // >= kMaxEventBytes.
     for (u32 i = 0; i < n; ++i) {
-        buf_[used_ + i] = bytes[i];
+        buf_[8 + used_ + i] = bytes[i];
     }
     used_ += n;
     ++events_;
