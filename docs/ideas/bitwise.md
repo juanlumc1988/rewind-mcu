@@ -1,6 +1,9 @@
 # bitwise — automatic protocol reverse engineering
 
-Parked idea, kept here so it does not evaporate. Not started.
+This idea is now developed in its own repository,
+[bitwise-bus](https://github.com/juanlumc1988/bitwise-bus). What follows is
+the original design note, kept here for history; the repository is the source
+of truth for what exists and how it works.
 
 ## The problem
 

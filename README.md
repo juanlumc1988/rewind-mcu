@@ -411,5 +411,7 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ---
 
-There is a second idea parked in [`docs/ideas/bitwise.md`](docs/ideas/bitwise.md):
-automatic protocol reverse engineering from bus captures. Not started.
+A second idea, automatic protocol reverse engineering from bus captures, began
+as a design note in [`docs/ideas/bitwise.md`](docs/ideas/bitwise.md) and is now
+developed in its own repository:
+[bitwise-bus](https://github.com/juanlumc1988/bitwise-bus).
