@@ -405,13 +405,19 @@ Stated plainly, because the gap between this and the pitch is real:
 3. DMA events.
 4. Qt timeline and two-trace diffing, over the navigation that now exists.
 
+## Related projects
+
+[bitwise-bus](https://github.com/juanlumc1988/bitwise-bus) infers undocumented
+bus protocols from captures. It began as a design note in this repository
+(`docs/ideas/bitwise.md`, still in the git history) and now lives on its own:
+its CRC identification stage works and is released, and the rest of its
+pipeline is designed and not written.
+
+The two do not share code. They meet at data: the bytes a firmware reads from
+a UART in a `rewind` trace are a capture, with cycle-accurate timing, and
+bitwise-bus plans a neutral capture format that an exporter on this side could
+feed. No such exporter exists here yet.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-
----
-
-A second idea, automatic protocol reverse engineering from bus captures, began
-as a design note in [`docs/ideas/bitwise.md`](docs/ideas/bitwise.md) and is now
-developed in its own repository:
-[bitwise-bus](https://github.com/juanlumc1988/bitwise-bus).
