@@ -105,7 +105,8 @@ const char* event_name(rwd::u8 type) {
     switch (type) {
         case rwd::EV_MMIO_READ:  return "read ";
         case rwd::EV_MMIO_WRITE: return "write";
-        case rwd::EV_IRQ_ENTER:  return "irq  ";
+        case rwd::EV_IRQ_ENTER:
+        case rwd::EV_IRQ_AT:     return "irq  ";
         case rwd::EV_STOP:       return "stop ";
         default:                    return "?    ";
     }
@@ -512,6 +513,10 @@ int cmd_dump(const Args& a) {
             std::printf("%10llu  %-5s  vector %-3u %-13s\n",
                         (unsigned long long)ev.ts, event_name(ev.type), ev.addr,
                         ev.addr == sim::kIrqUartRx ? "UART_RX" : "");
+        } else if (ev.type == rwd::EV_IRQ_AT) {
+            std::printf("%10llu  %-5s  vector %-3u %-13s returns to 0x%08X\n",
+                        (unsigned long long)ev.ts, event_name(ev.type), ev.addr,
+                        ev.addr == sim::kIrqUartRx ? "UART_RX" : "", ev.value);
         } else if (ev.type == rwd::EV_STOP) {
             std::printf("%10llu  %-5s\n", (unsigned long long)ev.ts, event_name(ev.type));
         } else {

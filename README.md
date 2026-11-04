@@ -176,7 +176,7 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
 | `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `tests/`    | 90 cases, 5.2 million assertions               | C++17 |
+| `tests/`    | 104 cases, 5.2 million assertions              | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -295,18 +295,18 @@ Built for a Cortex-M4 at `-Os`, measured in CI on every push:
 
 | Object | text (flash) | bss |
 |---|---:|---:|
-| `trace_writer.cpp` | 1044 | 0 |
-| `hal.cpp` | 657 | 50 |
+| `trace_writer.cpp` | 1092 | 0 |
+| `hal.cpp` | 741 | 50 |
 | `ring_buffer.cpp` | 334 | 0 |
 | `recorder.cpp` | 278 | 0 |
 | `varint.cpp` | 166 | 0 |
 | `crc32.cpp` | 140 | 0 |
-| `cortex_m.cpp` | 126 | 0 |
+| `cortex_m.cpp` | 154 | 0 |
 | `clock.cpp` | 98 | 0 |
-| **recording total** | **2843** | **50** |
-| `trace_reader.cpp` | 1521 | 0 |
+| **recording total** | **3003** | **50** |
+| `trace_reader.cpp` | 1704 | 0 |
 
-**Roughly 2.8 KB of flash and 50 bytes of .bss to record.** The reader is
+**Roughly 3.0 KB of flash and 50 bytes of .bss to record.** The reader is
 only linked in if the device replays its own traces — useful after a
 watchdog reset, and discarded by `--gc-sections` otherwise.
 
@@ -377,13 +377,16 @@ Stated plainly, because the gap between this and the pitch is real:
   strict rules as the rest and its register definitions come from the ARM
   documentation, but it has not been executed on a part. Reviewed, not tested.
 - **Interrupt dispatch is the real gap.** On hardware the NVIC dispatches at
-  any instruction boundary, so a real ISR announces itself by calling
-  `hal_record_irq_entry()`. On replay there is no NVIC, so the shim
-  dispatches — and it can only do so after an MMIO access. A trace recorded
-  on silicon whose interrupt landed mid-computation has no replayable point
-  to land on, and will be reported as a divergence rather than replayed
-  wrongly. Closing this needs the return address recorded alongside the
-  vector and something to stop on it. It is the next real problem.
+  any instruction boundary, so a real ISR announces itself. On replay there
+  is no NVIC, so the shim dispatches — and it can only do so after an MMIO
+  access. A trace recorded on silicon whose interrupt landed mid-computation
+  has no replayable point to land on, and will be reported as a divergence
+  rather than replayed wrongly. The first half of the fix is done: a vector
+  entry declared with `RWD_CORTEX_M_ISR` records the return address from the
+  exception frame (`EV_IRQ_AT`), and the trampoline has been run on an
+  emulated Cortex-M4, though not on a part. The second half is not: that
+  address belongs to the device build, so replay has nothing yet to stop on.
+  See [`docs/design/execution-model.md`](docs/design/execution-model.md).
 - **Reverse execution stops at iteration boundaries for checkpoints.** Seeks
   land on an exact event, but a checkpoint can only be taken where no call is
   in progress. Fine here; a firmware with a deeply nested main loop would
@@ -392,14 +395,15 @@ Stated plainly, because the gap between this and the pitch is real:
   simulated UART. No SWO, RTT or real UART driver ships here.
 - **No DMA.** The event type is designed and not implemented.
 - **No GUI.** Timeline scrubbing and trace diffing are the eventual Qt layer.
-- **CPU overhead is unmeasured.** Flash cost is now measured in CI (2.8 KB to
+- **CPU overhead is unmeasured.** Flash cost is now measured in CI (3.0 KB to
   record), but the <2% runtime target is still a design goal with no number
   behind it. It cannot get one without a part to run on.
 
 ## Roadmap
 
-1. Record the interrupt return address, so replay can re-enter a handler
-   where hardware actually did. This is what makes hardware traces replay.
+1. Re-enter a handler where hardware actually did. The return address is
+   recorded; replay still needs a position it can stop on. This is what makes
+   hardware traces replay.
 2. Run it on a part: a UART or RTT transport, and a measured overhead number
    held in CI.
 3. DMA events.

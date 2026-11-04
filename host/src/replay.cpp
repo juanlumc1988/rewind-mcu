@@ -21,6 +21,7 @@ const char* event_name(u8 type) {
         case rwd::EV_MMIO_READ:  return "MMIO_READ";
         case rwd::EV_MMIO_WRITE: return "MMIO_WRITE";
         case rwd::EV_IRQ_ENTER:  return "IRQ_ENTER";
+        case rwd::EV_IRQ_AT:     return "IRQ_AT";
         case rwd::EV_STOP:       return "STOP";
         default:                    return "?";
     }
@@ -198,7 +199,10 @@ u32 ReplayHal::poll_irq() {
         return rwd::kNoIrq;
     }
     const rwd::Event& ev = events_[cursor_];
-    if (ev.type != rwd::EV_IRQ_ENTER) {
+    // An interrupt recorded with its return address is served exactly like
+    // one without: after the access that precedes it in the trace. The
+    // address is carried for the dump; stopping on it is the next step.
+    if (ev.type != rwd::EV_IRQ_ENTER && ev.type != rwd::EV_IRQ_AT) {
         return rwd::kNoIrq;
     }
 

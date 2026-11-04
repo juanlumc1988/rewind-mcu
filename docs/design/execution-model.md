@@ -14,7 +14,7 @@ For bare-metal code the input set is small and closed:
 | Input | Event | Status |
 |---|---|---|
 | Peripheral register read | `EV_MMIO_READ` | implemented |
-| Interrupt arrival | `EV_IRQ_ENTER` | implemented |
+| Interrupt arrival | `EV_IRQ_ENTER`, `EV_IRQ_AT` | recorded; replayed at MMIO accesses only |
 | Clock read | an MMIO read of the timer | implemented |
 | DMA-deposited memory | `EV_DMA` | designed, not implemented |
 
@@ -48,8 +48,47 @@ something else — but it is a failure, and it is what stands between this
 working in simulation and working on a device.
 
 Closing it means recording where the interrupt actually landed, not just
-that it did: the return address from the exception frame, plus something on
-the host that can stop there. That is the next piece of real work.
+that it did, and having something on the host that can stop there.
+
+### Recording where it landed
+
+Done. A vector table entry declared with `RWD_CORTEX_M_ISR(name, vector)` is a
+short naked trampoline (six instructions): pick the stack the frame went to from
+bit 2 of `EXC_RETURN`, hand the frame and the vector number to
+`rwd_cortex_m_isr_entry`, and tail-branch. That reads the PC stacked in the
+exception frame and records it as `EV_IRQ_AT`, then runs the handler
+registered with `hal_set_isr`. `LR` is untouched, so the C++ return is the
+exception return.
+
+It has been run on an emulated Cortex-M4 (QEMU `mps2-an386`), not on a part:
+an interrupt pended by a store was recorded with the address of the very next
+instruction, on the main stack and on the process stack, and a trampoline that
+ignored `EXC_RETURN` failed the process-stack case. The emulator only shows
+the frame arithmetic is right. It says nothing about timing, and QEMU's NVIC
+model has no `DWT->CYCCNT`, so timestamps there come from elsewhere.
+
+### Stopping on it
+
+Not done, and not as simple as it looks. The address is a location in the
+*device* binary. Replay runs the firmware compiled for the *host*, where that
+address means nothing, so there is nothing to compare it with. What replay
+needs is a coordinate for "where in the run" that is the same in both builds.
+
+The existing one is the order of MMIO accesses, and it is exact but coarse:
+it says the interrupt came between access *k* and *k+1*, not where in the
+computation between them. The straightforward refinement is more places to
+stop: explicit probe points in the firmware that cross the shim like an MMIO
+access does, counted identically on the device and the host. Precision is then
+a matter of how densely they are placed. The recorded address stays useful as
+a check: it can say how far past the last probe an interrupt landed, and so
+whether the probes were dense enough to reproduce a given race.
+
+Past that, the trace is itself an oracle. Candidate landing points between two
+accesses are few, and replay already knows how to rewind cheaply and detect a
+divergence, so a landing can be found by trying candidates and keeping the one
+the rest of the trace agrees with.
+
+Neither is built yet.
 
 Under the simulator the question does not arise, because the simulator has
 no way to interrupt except through the shim. Traces recorded there replay
