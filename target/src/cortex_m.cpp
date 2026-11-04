@@ -46,3 +46,15 @@ u32 HardwareHal::s_poll_irq(void*) {
 
 } // namespace cortex_m
 } // namespace rwd
+
+// Entered from an RWD_CORTEX_M_ISR trampoline, with the handler's frame.
+// A null frame (it cannot happen from the trampoline; it can from a caller
+// that has no frame to give) still records the entry, with no address.
+extern "C" void rwd_cortex_m_isr_entry(rwd::u32 vector, const rwd::u32* frame) {
+    if (frame != 0) {
+        rwd::hal_record_irq_entry_at(vector, rwd::cortex_m::stacked_pc(frame));
+    } else {
+        rwd::hal_record_irq_entry(vector);
+    }
+    rwd::hal_run_isr(vector);
+}

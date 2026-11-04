@@ -159,3 +159,36 @@ jobs:
             echo "are not counted here."
           } >> "$GITHUB_STEP_SUMMARY"
           arm-none-eabi-size -t build-arm/librewind_core.a build-arm/librewind_target.a
+
+  # The Cortex-M interrupt trampoline is ARM assembly that reads the exception
+  # frame the core pushes, so the host tests cannot run it and the job above
+  # only proves it compiles. QEMU can run it: pend an interrupt, record it, and
+  # check the return address in the trace -- on the main stack and on the
+  # process stack. A deliberately broken trampoline must fail the same check,
+  # or the check proves nothing. Emulated, not silicon: it says nothing about
+  # timing, and QEMU's NVIC has no DWT cycle counter.
+  cortex-m-qemu:
+    name: cortex-m4 interrupt trampoline (qemu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No recommends: gcc-arm-none-eabi would otherwise pull in a ~3 GB
+      # libstdc++ for newlib that the freestanding target side never links.
+      - name: Install toolchain and emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+                ninja-build gcc-arm-none-eabi binutils-arm-none-eabi qemu-system-arm
+
+      - name: Build the target-side libraries
+        run: |
+          cmake -S . -B build-arm -G Ninja \
+                -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
+                -DCMAKE_BUILD_TYPE=MinSizeRel \
+                -DREWIND_BUILD_TESTS=OFF \
+                -DREWIND_WERROR=ON
+          cmake --build build-arm -j --target rewind_core rewind_target
+
+      - name: Run the trampoline under QEMU
+        run: tests/qemu/run.sh build-arm

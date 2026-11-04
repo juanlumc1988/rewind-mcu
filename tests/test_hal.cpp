@@ -283,3 +283,93 @@ TEST_CASE("divergence latches the first report") {
     CHECK_FALSE(rwd::hal_diverged());
     CHECK(std::string(rwd::hal_divergence()) == "");
 }
+
+TEST_CASE("an interrupt that reports its return address is recorded with it") {
+    FakeHal             hal;
+    rwhost::VectorSink  sink;
+    rwd::TraceWriter writer;
+    u8                  block[rwd::kMinBlockBuffer];
+
+    arm(hal);
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 1, 2, rwd::kFlagRecordWrites));
+    rwd::hal_mode_record(&writer);
+
+    rwd::mmio_read32(0x40000000u);
+    rwd::hal_record_irq_entry_at(2u, 0x08000ABCu);   // what a real ISR does
+    rwd::mmio_read32(0x40000000u);
+
+    REQUIRE(writer.finish(rwd::hal_now()));
+    rwd::hal_reset();
+
+    const std::vector<rwd::Event> events = decode(sink.bytes);
+    REQUIRE(events.size() == 4u);
+    CHECK(events[0].type  == rwd::EV_MMIO_READ);
+    CHECK(events[1].type  == rwd::EV_IRQ_AT);
+    CHECK(events[1].addr  == 2u);
+    CHECK(events[1].value == 0x08000ABCu);
+    CHECK(events[2].type  == rwd::EV_MMIO_READ);
+    // Stamped with the backend's clock, like every other event. The fake
+    // clock only moves on an access, so the interrupt shares the previous
+    // read's time and the next read is later.
+    CHECK(events[1].ts == events[0].ts);
+    CHECK(events[2].ts >  events[1].ts);
+}
+
+TEST_CASE("reporting a return address outside MODE_RECORD is inert") {
+    FakeHal hal;
+    arm(hal);
+    rwd::hal_mode_off();
+    rwd::hal_record_irq_entry_at(1u, 0x08000000u);   // must not crash
+
+    rwd::hal_reset();                                // no backend at all
+    rwd::hal_record_irq_entry_at(1u, 0x08000000u);
+    CHECK(rwd::hal_mode() == rwd::MODE_OFF);
+}
+
+TEST_CASE("hal_run_isr calls the installed handler and ignores the rest") {
+    FakeHal hal;
+    arm(hal);
+    rwd::hal_set_isr(4u, &isr_counting);
+
+    rwd::hal_run_isr(4u);
+    CHECK(g_isr_calls == 1u);
+
+    rwd::hal_run_isr(5u);                  // nothing installed
+    rwd::hal_run_isr(rwd::kMaxIrqVectors); // out of range
+    rwd::hal_run_isr(0xFFFFFFFFu);
+    CHECK(g_isr_calls == 1u);
+    rwd::hal_reset();
+}
+
+TEST_CASE("replay serves an interrupt recorded with its return address") {
+    // The address is carried, not yet acted on: the handler runs after the
+    // access that precedes the interrupt in the trace, exactly as for a
+    // plain EV_IRQ_ENTER.
+    rwhost::VectorSink  sink;
+    rwd::TraceWriter writer;
+    u8                  block[rwd::kMinBlockBuffer];
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 1, 2, rwd::kFlagRecordWrites));
+    REQUIRE(writer.mmio_read(10, 0x40000000u, 7u));
+    REQUIRE(writer.irq_enter_at(20, 3u, 0x08000ABCu));
+    REQUIRE(writer.mmio_read(30, 0x40000000u, 8u));
+    REQUIRE(writer.finish(40));
+
+    rwhost::ReplayHal replay;
+    REQUIRE(replay.load(sink.bytes.data(), sink.bytes.size()));
+
+    g_isr_calls = 0;
+    rwd::hal_reset();
+    rwd::hal_attach(replay.ops());
+    rwd::hal_mode_replay();
+    rwd::hal_set_isr(3u, &isr_counting);
+
+    CHECK(rwd::mmio_read32(0x40000000u) == 7u);
+    CHECK(g_isr_calls == 1u);                 // served right after the read
+    CHECK(rwd::mmio_read32(0x40000000u) == 8u);
+    CHECK_FALSE(rwd::hal_diverged());
+    CHECK_FALSE(replay.diverged());
+    CHECK(replay.cursor() == 3u);
+    rwd::hal_reset();
+}

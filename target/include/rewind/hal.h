@@ -91,7 +91,20 @@ void mmio_write32(u32 addr, u32 value);
 //
 // Closing that gap needs the return address recorded alongside the vector
 // and something to stop on it. It is the next real problem, not a detail.
+// Recording the address is hal_record_irq_entry_at(); stopping on it is not
+// done yet.
 void hal_record_irq_entry(u32 vector);
+
+// As hal_record_irq_entry(), plus the address the CPU returns to when the
+// handler finishes -- the PC stacked in the exception frame, which is the
+// instruction the interrupt landed in front of. `return_pc` belongs to the
+// build that recorded it. cortex_m.h reads it out of the frame for you.
+void hal_record_irq_entry_at(u32 vector, u32 return_pc);
+
+// Calls the handler installed for `vector`, if any. For a hardware vector
+// table entry that has already recorded the entry itself; the simulator and
+// replay dispatch through HalOps::poll_irq instead and never call this.
+void hal_run_isr(u32 vector);
 
 // Instrumentation only. Under MODE_REPLAY this reports the timestamp of the
 // last consumed event, which tracks the recorded clock at every MMIO access

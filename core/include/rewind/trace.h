@@ -38,7 +38,15 @@
 //   EV_MMIO_READ   delta_ts, delta_addr, value
 //   EV_MMIO_WRITE  delta_ts, delta_addr, value
 //   EV_IRQ_ENTER   delta_ts, vector
+//   EV_IRQ_AT      delta_ts, vector, return_pc      (version 3)
 //   EV_STOP        delta_ts
+//
+// EV_IRQ_AT is EV_IRQ_ENTER plus the address the CPU will return to: the PC
+// stacked in the exception frame, i.e. the instruction the interrupt landed
+// in front of. A recorder that can see the frame (a real Cortex-M ISR) emits
+// it; one that cannot (the simulator, where the shim dispatches) emits plain
+// EV_IRQ_ENTER. The address belongs to the build that recorded it, which is
+// what build_id is for. Version 2 traces have no EV_IRQ_AT and still read.
 //
 // Two fields are deltas against the previous event, across the whole stream
 // rather than per block, and both earn their keep:
@@ -68,7 +76,8 @@ namespace rwd {
 
 // Stored little-endian, so byte 0 is 'R' (0x52) and byte 3 is 'D' (0x44).
 const u32 kTraceMagic      = 0x444E5752u;
-const u16 kTraceVersion    = 2;
+const u16 kTraceVersion    = 3;
+const u16 kTraceMinVersion = 2;   // oldest version the reader still accepts
 const u32 kTraceHeaderSize = 32;
 
 // Per-block framing overhead: payload_len + seq + crc32.
@@ -78,7 +87,8 @@ enum EventType {
     EV_MMIO_READ  = 0x01,
     EV_MMIO_WRITE = 0x02,
     EV_IRQ_ENTER  = 0x03,
-    EV_STOP       = 0x04
+    EV_STOP       = 0x04,
+    EV_IRQ_AT     = 0x05
 };
 
 enum TraceFlags {
@@ -103,8 +113,9 @@ struct TraceHeader {
 struct Event {
     u8  type;
     u64 ts;
-    u32 addr;   // EV_MMIO_*: address.  EV_IRQ_ENTER: vector number.
-    u32 value;  // EV_MMIO_*: value.    Otherwise zero.
+    u32 addr;   // EV_MMIO_*: address.  EV_IRQ_*: vector number.
+    u32 value;  // EV_MMIO_*: value.    EV_IRQ_AT: return address.
+                // Otherwise zero.
 };
 
 // -- little-endian byte access, independent of host endianness --

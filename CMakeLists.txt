@@ -122,6 +122,7 @@ if(REWIND_BUILD_TESTS)
         tests/test_ring_buffer.cpp
         tests/test_hal.cpp
         tests/test_clock.cpp
+        tests/test_cortex_m.cpp
         tests/test_recorder.cpp
         tests/test_timeline.cpp
         tests/test_determinism.cpp)

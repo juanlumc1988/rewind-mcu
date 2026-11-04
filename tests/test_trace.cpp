@@ -626,3 +626,152 @@ TEST_CASE("a failed open leaves the reader unusable, not half-open") {
     CHECK_FALSE(reader.next(&ev));     // not still reading the first trace
     CHECK(reader.blocks_read() == 0u);
 }
+
+// -- return addresses (EV_IRQ_AT) --
+
+namespace {
+
+std::vector<rwd::Event> read_all(const std::vector<u8>& trace) {
+    std::vector<rwd::Event> out;
+    rwd::TraceReader        reader;
+    REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+    rwd::Event ev;
+    while (reader.next(&ev)) {
+        out.push_back(ev);
+    }
+    CHECK(reader.ok());
+    return out;
+}
+
+// A read, two interrupts that carry their return address, one that does not.
+std::vector<u8> irq_at_trace() {
+    rwhost::VectorSink sink;
+    rwd::TraceWriter   writer;
+    u8                 block[rwd::kMinBlockBuffer];
+
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 7, 8, rwd::kFlagRecordWrites));
+    REQUIRE(writer.mmio_read(10, 0x40000000u, 1u));
+    REQUIRE(writer.irq_enter_at(20, 3u, 0x08001234u));
+    REQUIRE(writer.irq_enter_at(25, 1u, 0xFFFFFFFEu));   // top of the space
+    REQUIRE(writer.irq_enter(30, 2u));
+    REQUIRE(writer.finish(40));
+    return sink.bytes;
+}
+
+} // namespace
+
+TEST_CASE("a return address round-trips through writer and reader") {
+    const std::vector<rwd::Event> events = read_all(irq_at_trace());
+    REQUIRE(events.size() == 5u);
+
+    CHECK(events[1].type  == rwd::EV_IRQ_AT);
+    CHECK(events[1].ts    == 20u);
+    CHECK(events[1].addr  == 3u);            // the vector, as for EV_IRQ_ENTER
+    CHECK(events[1].value == 0x08001234u);   // the return address
+
+    CHECK(events[2].type  == rwd::EV_IRQ_AT);
+    CHECK(events[2].addr  == 1u);
+    CHECK(events[2].value == 0xFFFFFFFEu);
+
+    // The plain form is untouched, and carries no address.
+    CHECK(events[3].type  == rwd::EV_IRQ_ENTER);
+    CHECK(events[3].addr  == 2u);
+    CHECK(events[3].value == 0u);
+}
+
+TEST_CASE("an interrupt does not disturb the address predictor") {
+    // The return address is not a peripheral address. If it reset the
+    // predictor, the read after it would pay for a long delta.
+    rwhost::VectorSink sink;
+    rwd::TraceWriter   writer;
+    u8                 block[rwd::kMinBlockBuffer];
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 0, 0, 0));
+    REQUIRE(writer.mmio_read(1, 0x40001000u, 5u));
+    REQUIRE(writer.irq_enter_at(2, 1u, 0x08000000u));
+    REQUIRE(writer.mmio_read(3, 0x40001004u, 6u));
+    REQUIRE(writer.finish(4));
+
+    const std::vector<rwd::Event> events = read_all(sink.bytes);
+    REQUIRE(events.size() == 4u);
+    CHECK(events[0].addr == 0x40001000u);
+    CHECK(events[2].addr == 0x40001004u);
+}
+
+TEST_CASE("version 2 traces still open and read the same") {
+    // A version 2 trace is a version 3 trace with no EV_IRQ_AT in it, so
+    // relabelling one is a faithful stand-in for a trace from an old build.
+    const Recorded rec = make_trace(60);
+    std::vector<u8> old_trace = rec.bytes;
+    rwd::put_u16_le(old_trace.data() + 4, 2u);
+
+    const std::vector<rwd::Event> events = read_all(old_trace);
+    REQUIRE(events.size() == rec.expected.size());
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        CHECK(events[i].type  == rec.expected[i].type);
+        CHECK(events[i].ts    == rec.expected[i].ts);
+        CHECK(events[i].addr  == rec.expected[i].addr);
+        CHECK(events[i].value == rec.expected[i].value);
+    }
+}
+
+TEST_CASE("versions outside the supported range are refused") {
+    const Recorded rec = make_trace(4);
+    std::vector<u8> trace = rec.bytes;
+
+    rwd::TraceReader reader;
+    rwd::put_u16_le(trace.data() + 4, rwd::kTraceMinVersion - 1u);
+    CHECK_FALSE(reader.open(trace.data(), (u32)trace.size()));
+    CHECK(std::string(reader.error()).find("version") != std::string::npos);
+
+    rwd::put_u16_le(trace.data() + 4, 0u);
+    CHECK_FALSE(reader.open(trace.data(), (u32)trace.size()));
+}
+
+TEST_CASE("EV_IRQ_AT inside a version 2 trace is refused") {
+    // No version 2 writer ever emits it, so it is damage or a splice, and
+    // decoding it anyway would hide that.
+    std::vector<u8> trace = irq_at_trace();
+    rwd::put_u16_le(trace.data() + 4, 2u);
+
+    rwd::TraceReader reader;
+    REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+    rwd::Event ev;
+    while (reader.next(&ev)) {
+    }
+    CHECK_FALSE(reader.ok());
+    CHECK(std::string(reader.error()).find("unknown event type") != std::string::npos);
+}
+
+TEST_CASE("a malformed return address is rejected") {
+    SUBCASE("missing") {
+        std::vector<u8> payload;
+        payload.push_back((u8)rwd::EV_IRQ_AT);
+        append_varint(&payload, 0u);   // delta_ts
+        append_varint(&payload, 1u);   // vector -- and then the payload ends
+
+        const std::vector<u8> trace = handmade_trace(payload);
+        rwd::TraceReader      reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+        rwd::Event ev;
+        CHECK_FALSE(reader.next(&ev));
+        CHECK_FALSE(reader.ok());
+        CHECK(std::string(reader.error()).find("return address") != std::string::npos);
+    }
+    SUBCASE("wider than 32 bits") {
+        std::vector<u8> payload;
+        payload.push_back((u8)rwd::EV_IRQ_AT);
+        append_varint(&payload, 0u);
+        append_varint(&payload, 1u);
+        append_varint(&payload, 0x100000000ULL);
+
+        const std::vector<u8> trace = handmade_trace(payload);
+        rwd::TraceReader      reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+        rwd::Event ev;
+        CHECK_FALSE(reader.next(&ev));
+        CHECK_FALSE(reader.ok());
+        CHECK(std::string(reader.error()).find("32 bits") != std::string::npos);
+    }
+}

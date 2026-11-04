@@ -151,7 +151,8 @@ bool TraceWriter::write_mmio(u8 type, u64 ts, u32 addr, u32 value) {
     return true;
 }
 
-bool TraceWriter::write_plain(u8 type, u64 ts, const u32* arg) {
+bool TraceWriter::write_plain(u8 type, u64 ts, const u32* arg,
+                              const u32* arg2) {
     if (!ok_ || !started_ || finished_) {
         return false;
     }
@@ -166,6 +167,9 @@ bool TraceWriter::write_plain(u8 type, u64 ts, const u32* arg) {
     n += varint_encode(ts - last_ts_, scratch + n);
     if (arg != 0) {
         n += varint_encode((u64)*arg, scratch + n);
+    }
+    if (arg2 != 0) {
+        n += varint_encode((u64)*arg2, scratch + n);
     }
 
     if (!stage(scratch, n)) {
@@ -190,7 +194,13 @@ bool TraceWriter::mmio_write(u64 ts, u32 addr, u32 value) {
 }
 
 bool TraceWriter::irq_enter(u64 ts, u32 vector) {
-    return write_plain((u8)EV_IRQ_ENTER, ts, &vector);
+    return write_plain((u8)EV_IRQ_ENTER, ts, &vector, 0);
+}
+
+bool TraceWriter::irq_enter_at(u64 ts, u32 vector, u32 return_pc) {
+    // Absolute, not a delta: handlers return to unrelated places, so a
+    // delta against the previous interrupt's address would not be smaller.
+    return write_plain((u8)EV_IRQ_AT, ts, &vector, &return_pc);
 }
 
 bool TraceWriter::finish(u64 ts) {
@@ -198,7 +208,7 @@ bool TraceWriter::finish(u64 ts) {
         return false;
     }
     if (ok_) {
-        write_plain((u8)EV_STOP, ts, 0);
+        write_plain((u8)EV_STOP, ts, 0, 0);
     }
     if (ok_) {
         flush_block();

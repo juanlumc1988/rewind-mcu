@@ -63,6 +63,10 @@ public:
     bool mmio_write(u64 ts, u32 addr, u32 value);
     bool irq_enter(u64 ts, u32 vector);
 
+    // As irq_enter(), plus the address the CPU returns to when the handler
+    // finishes. Emits EV_IRQ_AT.
+    bool irq_enter_at(u64 ts, u32 vector, u32 return_pc);
+
     // Emits EV_STOP, flushes the pending block and writes the terminator.
     bool finish(u64 ts);
 
@@ -87,7 +91,7 @@ public:
 
 private:
     bool write_mmio(u8 type, u64 ts, u32 addr, u32 value);
-    bool write_plain(u8 type, u64 ts, const u32* arg);
+    bool write_plain(u8 type, u64 ts, const u32* arg, const u32* arg2);
     bool stage(const u8* bytes, u32 n);
     // Always succeeds: a block the sink refuses is counted, not an error.
     void flush_block();

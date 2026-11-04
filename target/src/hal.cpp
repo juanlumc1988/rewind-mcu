@@ -124,6 +124,18 @@ void hal_record_irq_entry(u32 vector) {
     }
 }
 
+void hal_record_irq_entry_at(u32 vector, u32 return_pc) {
+    if (g_mode == MODE_RECORD && g_writer != 0 && g_ops != 0 && g_ops->now != 0) {
+        g_writer->irq_enter_at(g_ops->now(g_ops->ctx), vector, return_pc);
+    }
+}
+
+void hal_run_isr(u32 vector) {
+    if (vector < kMaxIrqVectors && g_isr[vector] != 0) {
+        g_isr[vector]();
+    }
+}
+
 u64 hal_now() {
     if (g_ops == 0 || g_ops->now == 0) {
         return 0;

@@ -14,10 +14,12 @@
 //   1. enable_cycle_counter() before recording, or every timestamp is zero.
 //      On most Cortex-M parts DWT is gated behind DEMCR.TRCENA.
 //
-//   2. Each ISR that matters calls hal_record_irq_entry(vector) in its
-//      prologue. The shim cannot observe an interrupt on hardware -- the
-//      NVIC dispatches without asking -- so poll_irq here always returns
-//      kNoIrq and the handler reports itself.
+//   2. Each ISR that matters reports itself. The shim cannot observe an
+//      interrupt on hardware -- the NVIC dispatches without asking -- so
+//      poll_irq here always returns kNoIrq. Either put an
+//      RWD_CORTEX_M_ISR trampoline (below) in the vector table, which also
+//      records the return address, or call hal_record_irq_entry(vector) in
+//      the handler's prologue, which does not.
 
 #ifndef REWIND_CORTEX_M_H
 #define REWIND_CORTEX_M_H
@@ -36,6 +38,31 @@ const u32 kDwtCtrl        = 0xE0001000u;
 const u32 kDwtCyccnt      = 0xE0001004u;
 const u32 kDwtCtrlCyccnt  = 0x00000001u;   // DWT_CTRL bit 0, CYCCNTENA
 const u32 kDwtCtrlNocyc   = 0x02000000u;   // DWT_CTRL bit 25, NOCYCCNT
+
+// -- the exception frame --
+//
+// On exception entry the core pushes eight words onto the stack in use at
+// the time of the interrupt, lowest address first (ARMv7-M ARM, B1.5.6):
+//
+//   [0] R0  [1] R1  [2] R2  [3] R3  [4] R12  [5] LR  [6] PC  [7] xPSR
+//
+// [6] is the address execution resumes at when the handler returns: the
+// instruction the interrupt landed in front of. With the FPU in use, floating
+// point state is pushed *after* these eight, so their offsets do not move.
+// Stack alignment padding is added above the frame, not below it.
+const u32 kFramePcIndex = 6;
+
+// Bit 2 of EXC_RETURN (the value LR holds on handler entry) says which stack
+// the frame went to: clear = main stack (MSP), set = process stack (PSP).
+const u32 kExcReturnPsp = 0x00000004u;
+
+inline const u32* exception_frame(u32 exc_return, const u32* msp, const u32* psp) {
+    return (exc_return & kExcReturnPsp) != 0 ? psp : msp;
+}
+
+inline u32 stacked_pc(const u32* frame) {
+    return frame[kFramePcIndex];
+}
 
 inline u32 raw_read32(u32 addr) {
     return *reinterpret_cast<volatile u32*>(addr);
@@ -72,5 +99,38 @@ private:
 
 } // namespace cortex_m
 } // namespace rwd
+
+// -- hardware vector table entries that record where they landed --
+//
+// What an ISR needs to record its return address is the frame pointer, and
+// the frame pointer is only visible before the compiler has touched SP, so it
+// cannot be written in C++. RWD_CORTEX_M_ISR(name, vector) defines `name` as a
+// tiny naked function: pick MSP or PSP from EXC_RETURN, pass the frame and the
+// shim vector number on, and tail-branch to rwd_cortex_m_isr_entry. LR is
+// left holding EXC_RETURN, so the C++ function's own return is the exception
+// return -- exactly as it would be for a hand-written C handler.
+//
+// Put `name` in the vector table, and register the real handler with
+// hal_set_isr(vector, fn). The handler then runs exactly as it does in the
+// simulator, and the trace gets an EV_IRQ_AT for it.
+//
+//     RWD_CORTEX_M_ISR(USART1_IRQHandler, 1)
+//
+// Defined for ARM only; elsewhere the macro is not available, because there
+// is no exception frame to read.
+extern "C" void rwd_cortex_m_isr_entry(rwd::u32 vector, const rwd::u32* frame);
+
+#if defined(__arm__)
+#define RWD_CORTEX_M_ISR(name, vector)                                      \
+    extern "C" __attribute__((naked)) void name() {                         \
+        __asm__ volatile(                                                   \
+            "tst   lr, #4                 \n"                               \
+            "ite   eq                     \n"                               \
+            "mrseq r1, msp                \n"                               \
+            "mrsne r1, psp                \n"                               \
+            "movs  r0, #" #vector "       \n"                               \
+            "b     rwd_cortex_m_isr_entry \n");                             \
+    }
+#endif
 
 #endif // REWIND_CORTEX_M_H

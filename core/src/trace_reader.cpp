@@ -60,7 +60,7 @@ bool TraceReader::open(const u8* data, u32 len) {
         return fail("bad magic: not a rewind trace");
     }
     hdr_.version = get_u16_le(data + 4);
-    if (hdr_.version != kTraceVersion) {
+    if (hdr_.version < kTraceMinVersion || hdr_.version > kTraceVersion) {
         return fail("unsupported trace version");
     }
     hdr_.flags    = get_u16_le(data + 6);
@@ -164,11 +164,21 @@ bool TraceReader::next(Event* out) {
 
     bool is_mmio = false;
     bool has_arg = false;
+    bool has_pc  = false;
     switch (type) {
         case EV_MMIO_READ:
         case EV_MMIO_WRITE: is_mmio = true;  has_arg = true;  break;
         case EV_IRQ_ENTER:  is_mmio = false; has_arg = true;  break;
         case EV_STOP:       is_mmio = false; has_arg = false; break;
+        case EV_IRQ_AT:
+            // A version 2 writer never emits this, so seeing it there is a
+            // damaged or spliced trace, not an old one.
+            if (hdr_.version < 3) {
+                done_ = true;
+                return fail("unknown event type");
+            }
+            is_mmio = false; has_arg = true; has_pc = true;
+            break;
         default:
             done_ = true;
             return fail("unknown event type");
@@ -218,6 +228,21 @@ bool TraceReader::next(Event* out) {
             }
             addr = (u32)raw;   // vector number
         }
+    }
+
+    if (has_pc) {
+        u64 raw = 0;
+        n = varint_decode(data_ + pos_ + off, avail - off, &raw);
+        if (n == 0) {
+            done_ = true;
+            return fail("malformed return address varint");
+        }
+        if (raw > 0xFFFFFFFFu) {
+            done_ = true;
+            return fail("return address does not fit in 32 bits");
+        }
+        off += n;
+        value = (u32)raw;
     }
 
     if (is_mmio) {
