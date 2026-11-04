@@ -209,8 +209,9 @@ ctest --test-dir build
 ```
 
 CI runs this on GCC and Clang, in Debug and RelWithDebInfo, with warnings as
-errors; separately under ASan and UBSan; and separately again cross-compiled
-to a Cortex-M4.
+errors; separately under ASan and UBSan; separately again cross-compiled to a
+Cortex-M4; and once more with the Cortex-M interrupt trampoline run on an
+emulated one (see below).
 
 Cross-compiling the libraries that would ship on the device needs the
 `arm-none-eabi` toolchain (`sudo apt install gcc-arm-none-eabi` on
@@ -222,6 +223,12 @@ cmake -S . -B build-arm -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
       -DREWIND_BUILD_TESTS=OFF
 cmake --build build-arm --target rewind_core rewind_target
 ```
+
+The Cortex-M interrupt trampoline is ARM assembly that reads the exception
+frame the core pushes, which the host tests cannot run. With `qemu-system-arm`
+installed, `tests/qemu/run.sh build-arm` runs it on an emulated Cortex-M4:
+the return address it records must match, on the main stack and on the process
+stack. It is an emulator, not a part, and says nothing about timing.
 
 ## How it works
 
@@ -384,7 +391,7 @@ Stated plainly, because the gap between this and the pitch is real:
   rather than replayed wrongly. The first half of the fix is done: a vector
   entry declared with `RWD_CORTEX_M_ISR` records the return address from the
   exception frame (`EV_IRQ_AT`), and the trampoline has been run on an
-  emulated Cortex-M4, though not on a part. The second half is not: that
+  emulated Cortex-M4 (`tests/qemu`), though not on a part. The second half is not: that
   address belongs to the device build, so replay has nothing yet to stop on.
   See [`docs/design/execution-model.md`](docs/design/execution-model.md).
 - **Reverse execution stops at iteration boundaries for checkpoints.** Seeks

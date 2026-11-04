@@ -60,12 +60,14 @@ exception frame and records it as `EV_IRQ_AT`, then runs the handler
 registered with `hal_set_isr`. `LR` is untouched, so the C++ return is the
 exception return.
 
-It has been run on an emulated Cortex-M4 (QEMU `mps2-an386`), not on a part:
-an interrupt pended by a store was recorded with the address of the very next
-instruction, on the main stack and on the process stack, and a trampoline that
-ignored `EXC_RETURN` failed the process-stack case. The emulator only shows
-the frame arithmetic is right. It says nothing about timing, and QEMU's NVIC
-model has no `DWT->CYCCNT`, so timestamps there come from elsewhere.
+It is run on an emulated Cortex-M4 (QEMU `mps2-an386`), not on a part, by
+`tests/qemu/run.sh` and by CI: an interrupt pended by a store is recorded with
+the address of the very next instruction, on the main stack and on the process
+stack, and a trampoline that ignores `EXC_RETURN` is built alongside and must
+fail the process-stack case, or the check would prove nothing. The emulator
+only shows the frame arithmetic is right. It says nothing about timing, and
+QEMU's NVIC model has no `DWT->CYCCNT`, so timestamps there come from
+elsewhere.
 
 ### Stopping on it
 
