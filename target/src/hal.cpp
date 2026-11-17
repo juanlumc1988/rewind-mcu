@@ -136,6 +136,22 @@ void hal_run_isr(u32 vector) {
     }
 }
 
+void hal_site(u32 id) {
+    if (g_ops == 0) {
+        return;
+    }
+    // Same order as an MMIO access: the backend moves first, the event is
+    // stamped with where it left the clock, and only then may an interrupt
+    // be delivered.
+    if (g_ops->site != 0) {
+        g_ops->site(g_ops->ctx, id);
+    }
+    if (g_mode == MODE_RECORD && g_writer != 0 && g_ops->now != 0) {
+        g_writer->site(g_ops->now(g_ops->ctx), id);
+    }
+    pump_irqs();
+}
+
 u64 hal_now() {
     if (g_ops == 0 || g_ops->now == 0) {
         return 0;

@@ -38,10 +38,13 @@ void isr_counting() { ++g_isr_calls; }
 
 std::vector<rwd::Event> record_entry(const u32* frame, u32 vector) {
     u64                clock = 0;
-    rwd::HalOps        ops   = { 0, 0, &fake_now, 0, &clock };
+    rwd::HalOps        ops;
     rwhost::VectorSink sink;
     rwd::TraceWriter   writer;
     u8                 block[rwd::kMinBlockBuffer];
+
+    ops.now = &fake_now;
+    ops.ctx = &clock;
 
     g_isr_calls = 0;
     rwd::hal_reset();

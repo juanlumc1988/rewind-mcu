@@ -24,6 +24,7 @@ HardwareHal::HardwareHal() {
     ops_.now      = &HardwareHal::s_now;
     ops_.poll_irq = &HardwareHal::s_poll_irq;
     ops_.ctx      = this;
+    // ops_.site stays null: nothing to account for on real silicon.
 }
 
 u32 HardwareHal::s_read32(void*, u32 addr) {

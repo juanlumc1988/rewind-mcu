@@ -43,6 +43,12 @@ const u32 kIrqUartRx = 1u;
 // firmware and the arrival schedule share, which is all that matters.
 const u32 kMmioCost = 3u;
 
+// Cycles charged per probe point (RWD_SITE). A site stands for a stretch of
+// computation, not a register access, so it is cheaper -- but not free: time
+// has to pass for a byte to be able to arrive there, and then the interrupt is
+// delivered right after the site, inside whatever window it was placed in.
+const u32 kSiteCost = 1u;
+
 // Arrival schedule.
 //
 // Bytes arrive in frames, because that is how a real link behaves: a burst
@@ -93,12 +99,14 @@ private:
     u32  read32(u32 addr);
     void write32(u32 addr, u32 value);
     u32  poll_irq();
+    void site(u32 id);
 
     // Trampolines: HalOps is a C-style vtable, so member calls need a hop.
     static u32  s_read32(void* ctx, u32 addr);
     static void s_write32(void* ctx, u32 addr, u32 value);
     static u64  s_now(void* ctx);
     static u32  s_poll_irq(void* ctx);
+    static void s_site(void* ctx, u32 id);
 
     Mcu(const Mcu&);
     Mcu& operator=(const Mcu&);

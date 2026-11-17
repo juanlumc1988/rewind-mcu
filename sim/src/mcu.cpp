@@ -22,6 +22,7 @@ Mcu::Mcu(u64 seed, u32 tx_total)
     ops_.now      = &Mcu::s_now;
     ops_.poll_irq = &Mcu::s_poll_irq;
     ops_.ctx      = this;
+    ops_.site     = &Mcu::s_site;
 
     // Warm the generator so nearby seeds diverge immediately instead of
     // producing correlated first arrivals.
@@ -100,6 +101,10 @@ void Mcu::write32(u32 addr, u32 value) {
     }
 }
 
+void Mcu::site(u32) {
+    advance(kSiteCost);
+}
+
 u32 Mcu::poll_irq() {
     if (irq_latched_) {
         irq_latched_ = false;
@@ -112,5 +117,6 @@ u32  Mcu::s_read32(void* ctx, u32 addr) { return static_cast<Mcu*>(ctx)->read32(
 void Mcu::s_write32(void* ctx, u32 addr, u32 v) { static_cast<Mcu*>(ctx)->write32(addr, v); }
 u64  Mcu::s_now(void* ctx) { return static_cast<Mcu*>(ctx)->cycles_; }
 u32  Mcu::s_poll_irq(void* ctx) { return static_cast<Mcu*>(ctx)->poll_irq(); }
+void Mcu::s_site(void* ctx, u32 id) { static_cast<Mcu*>(ctx)->site(id); }
 
 } // namespace sim

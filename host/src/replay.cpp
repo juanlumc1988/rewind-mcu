@@ -22,6 +22,7 @@ const char* event_name(u8 type) {
         case rwd::EV_MMIO_WRITE: return "MMIO_WRITE";
         case rwd::EV_IRQ_ENTER:  return "IRQ_ENTER";
         case rwd::EV_IRQ_AT:     return "IRQ_AT";
+        case rwd::EV_SITE:       return "SITE";
         case rwd::EV_STOP:       return "STOP";
         default:                    return "?";
     }
@@ -37,6 +38,7 @@ ReplayHal::ReplayHal()
     ops_.now      = &ReplayHal::s_now;
     ops_.poll_irq = &ReplayHal::s_poll_irq;
     ops_.ctx      = this;
+    ops_.site     = &ReplayHal::s_site;
 
     header_.magic    = 0;
     header_.version  = 0;
@@ -212,9 +214,45 @@ u32 ReplayHal::poll_irq() {
     return ev.addr;   // vector number
 }
 
+// A probe point is one more crossing, served in trace order like an access:
+// the recording crossed this label here, so the firmware must too. Anything
+// else -- no site in the trace, a different label, the trace already over --
+// means this is not the run that was recorded.
+void ReplayHal::site(u32 id) {
+    maybe_capture();
+
+    if (cursor_ >= events_.size()) {
+        diverge("site %u past the end of the recording "
+                "(%zu events consumed)", id, cursor_);
+        return;
+    }
+
+    const rwd::Event& ev = events_[cursor_];
+    if (ev.type == rwd::EV_STOP) {
+        diverge("site %u past the end of the recording "
+                "(the recorded run stopped after %zu events)", id, cursor_);
+        return;
+    }
+    if (ev.type != rwd::EV_SITE) {
+        diverge("event %zu: firmware crossed site %u, trace has %s",
+                cursor_, id, event_name(ev.type));
+        return;
+    }
+    if (ev.addr != id) {
+        diverge("event %zu: firmware crossed site %u, trace recorded site %u",
+                cursor_, id, ev.addr);
+        return;
+    }
+
+    ++cursor_;
+    ++events_served_;
+    now_ = ev.ts;
+}
+
 u32  ReplayHal::s_read32(void* ctx, u32 addr) { return static_cast<ReplayHal*>(ctx)->read32(addr); }
 void ReplayHal::s_write32(void* ctx, u32 a, u32 v) { static_cast<ReplayHal*>(ctx)->write32(a, v); }
 u64  ReplayHal::s_now(void* ctx) { return static_cast<ReplayHal*>(ctx)->now_; }
 u32  ReplayHal::s_poll_irq(void* ctx) { return static_cast<ReplayHal*>(ctx)->poll_irq(); }
+void ReplayHal::s_site(void* ctx, u32 id) { static_cast<ReplayHal*>(ctx)->site(id); }
 
 } // namespace rwhost
