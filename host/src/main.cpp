@@ -27,8 +27,8 @@ int usage() {
         "rewind -- deterministic record & replay for bare-metal firmware\n"
         "\n"
         "usage:\n"
-        "  rewind hunt   [--from N] [--to N] [--variant buggy|fixed] [--save FILE]\n"
-        "  rewind record [--seed N] [--variant buggy|fixed] [--tx N] [--iters N]\n"
+        "  rewind hunt   [--from N] [--to N] [--variant V] [--save FILE]\n"
+        "  rewind record [--seed N] [--variant V] [--tx N] [--iters N]\n"
         "                [--no-writes] --out FILE\n"
         "  rewind replay FILE [--iters N]\n"
         "  rewind dump   FILE [--limit N]\n"
@@ -39,7 +39,10 @@ int usage() {
         "common options:\n"
         "  --seed N      simulator seed; picks the interrupt arrival schedule\n"
         "  --variant V   buggy (default) clears the shared counter;\n"
-        "                fixed subtracts it under a critical section\n"
+        "                fixed subtracts it under a critical section;\n"
+        "                unguarded subtracts it without one -- a race that\n"
+        "                lives entirely in computation, which only the probe\n"
+        "                point inside its window lets the simulator hit\n"
         "  --tx N        bytes the UART delivers over the run (default 24)\n"
         "  --iters N     main-loop iterations (default 6000). Must match the\n"
         "                recording when replaying.\n"
@@ -99,6 +102,14 @@ bool write_file(const char* path, const std::vector<rwd::u8>& bytes) {
         return false;
     }
     return true;
+}
+
+const char* variant_name(fw::Variant variant) {
+    switch (variant) {
+        case fw::kFixed:     return "fixed";
+        case fw::kUnguarded: return "unguarded";
+        default:             return "buggy";
+    }
 }
 
 const char* event_name(rwd::u8 type) {
@@ -198,6 +209,8 @@ Args parse(int argc, char** argv, int first) {
                 a.variant = fw::kFixed;
             } else if (v == "buggy") {
                 a.variant = fw::kBuggy;
+            } else if (v == "unguarded") {
+                a.variant = fw::kUnguarded;
             } else {
                 std::fprintf(stderr, "rewind: unknown variant '%s'\n", v.c_str());
                 a.bad = true;
@@ -494,7 +507,7 @@ int cmd_dump(const Args& a) {
     const bool  known = rwhost::variant_for_build_id(reader.header().build_id, &variant);
     std::printf("build 0x%016llX (%s)  seed %llu  flags 0x%04X  %zu bytes\n\n",
                 (unsigned long long)reader.header().build_id,
-                known ? (variant == fw::kFixed ? "fixed" : "buggy") : "unknown",
+                known ? variant_name(variant) : "unknown",
                 (unsigned long long)reader.header().seed,
                 reader.header().flags, bytes.size());
     std::printf("%10s  %-5s  %-10s %-13s %s\n",

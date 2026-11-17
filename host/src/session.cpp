@@ -99,12 +99,20 @@ BufferedResult record_buffered(const BufferedConfig& cfg) {
 }
 
 u64 build_id_for(fw::Variant variant) {
-    return (variant == fw::kFixed) ? kBuildIdFixed : kBuildIdBuggy;
+    switch (variant) {
+        case fw::kFixed:     return kBuildIdFixed;
+        case fw::kUnguarded: return kBuildIdUnguarded;
+        default:             return kBuildIdBuggy;
+    }
 }
 
 bool variant_for_build_id(u64 build_id, fw::Variant* out) {
     if (build_id == kBuildIdBuggy) {
         *out = fw::kBuggy;
+        return true;
+    }
+    if (build_id == kBuildIdUnguarded) {
+        *out = fw::kUnguarded;
         return true;
     }
     if (build_id == kBuildIdFixed) {

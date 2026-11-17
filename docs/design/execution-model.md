@@ -109,8 +109,14 @@ replayed after the earlier one, so a window with no site in it is still out of
 reach. A site costs one event in the trace (about three bytes) and, outside
 recording, a call and a branch; `REWIND_DISABLE_SITES` removes it.
 
-Two things this does not do yet. The example firmware has no sites, so the
-README demo and its numbers are unchanged. And on a part, an interrupt that
+The example firmware uses one. Its `unguarded` variant is the fix that is not
+one: it subtracts what it handled, outside a critical section. `rewind hunt
+--variant unguarded` finds it on 85 of 1000 seeds, and every one of those has
+an interrupt directly after the site (`tests/test_unguarded.cpp`). Only that
+variant crosses the site, so the other two variants and the numbers quoted for
+them are unchanged.
+
+One thing this does not do yet. On a part, an interrupt that
 landed between two sites is replayed after the earlier one with nothing
 checking that the sites were dense enough: the recorded return address could
 say how far past the last site it landed, and flag a window the sites did not

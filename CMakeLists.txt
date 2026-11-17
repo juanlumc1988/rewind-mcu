@@ -124,6 +124,7 @@ if(REWIND_BUILD_TESTS)
         tests/test_clock.cpp
         tests/test_cortex_m.cpp
         tests/test_sites.cpp
+        tests/test_unguarded.cpp
         tests/test_recorder.cpp
         tests/test_timeline.cpp
         tests/test_determinism.cpp)
