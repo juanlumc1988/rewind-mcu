@@ -373,3 +373,151 @@ TEST_CASE("replay serves an interrupt recorded with its return address") {
     CHECK(replay.cursor() == 3u);
     rwd::hal_reset();
 }
+
+// -- probe points --
+
+TEST_CASE("a probe point is recorded in order with the accesses around it") {
+    FakeHal             hal;
+    rwhost::VectorSink  sink;
+    rwd::TraceWriter writer;
+    u8                  block[rwd::kMinBlockBuffer];
+
+    arm(hal);
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 1, 2, rwd::kFlagRecordWrites));
+    rwd::hal_mode_record(&writer);
+
+    rwd::mmio_read32(0x40000000u);
+    RWD_SITE(7);                       // the backend has no site hook: fine
+    rwd::mmio_write32(0x40002000u, 3u);
+    rwd::hal_site(9u);
+
+    REQUIRE(writer.finish(rwd::hal_now()));
+    rwd::hal_reset();
+
+    const std::vector<rwd::Event> events = decode(sink.bytes);
+    REQUIRE(events.size() == 5u);
+    CHECK(events[0].type == rwd::EV_MMIO_READ);
+    CHECK(events[1].type == rwd::EV_SITE);
+    CHECK(events[1].addr == 7u);
+    CHECK(events[2].type == rwd::EV_MMIO_WRITE);
+    CHECK(events[3].type == rwd::EV_SITE);
+    CHECK(events[3].addr == 9u);
+}
+
+TEST_CASE("a probe point is inert outside MODE_RECORD and with no backend") {
+    FakeHal hal;
+    arm(hal);
+    rwd::hal_mode_off();
+    RWD_SITE(1);                     // nothing recorded, nothing to crash
+    CHECK(hal.reads.empty());
+
+    rwd::hal_reset();                // no backend at all
+    RWD_SITE(1);
+    CHECK(rwd::hal_mode() == rwd::MODE_OFF);
+}
+
+TEST_CASE("a probe point is where a pending interrupt is delivered") {
+    FakeHal             hal;
+    rwhost::VectorSink  sink;
+    rwd::TraceWriter writer;
+    u8                  block[rwd::kMinBlockBuffer];
+
+    arm(hal);
+    rwd::hal_set_isr(3u, &isr_counting);
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 1, 2, 0));
+    rwd::hal_mode_record(&writer);
+
+    hal.irqs.push_back(3u);
+    CHECK(g_isr_calls == 0u);
+    RWD_SITE(5);                     // no MMIO access anywhere: the site alone
+    CHECK(g_isr_calls == 1u);
+
+    REQUIRE(writer.finish(rwd::hal_now()));
+    rwd::hal_reset();
+
+    const std::vector<rwd::Event> events = decode(sink.bytes);
+    REQUIRE(events.size() >= 3u);
+    CHECK(events[0].type == rwd::EV_SITE);
+    CHECK(events[1].type == rwd::EV_IRQ_ENTER);   // right after the site
+}
+
+TEST_CASE("a masked probe point delivers nothing") {
+    FakeHal hal;
+    arm(hal);
+    rwd::hal_set_isr(3u, &isr_counting);
+    rwd::hal_mode_off();
+
+    hal.irqs.push_back(3u);
+    rwd::hal_irq_disable();
+    RWD_SITE(5);
+    CHECK(g_isr_calls == 0u);
+    rwd::hal_irq_enable();
+    RWD_SITE(5);
+    CHECK(g_isr_calls == 1u);
+    rwd::hal_reset();
+}
+
+TEST_CASE("replay checks probe points against the trace") {
+    rwhost::VectorSink  sink;
+    rwd::TraceWriter writer;
+    u8                  block[rwd::kMinBlockBuffer];
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 1, 2, rwd::kFlagRecordWrites));
+    REQUIRE(writer.mmio_read(10, 0x40000000u, 7u));
+    REQUIRE(writer.site(11, 7u));
+    REQUIRE(writer.irq_enter(12, 3u));
+    REQUIRE(writer.mmio_read(20, 0x40000000u, 8u));
+    REQUIRE(writer.finish(30));
+
+    rwhost::ReplayHal replay;
+    REQUIRE(replay.load(sink.bytes.data(), sink.bytes.size()));
+
+    SUBCASE("the same crossings, in the same order, replay") {
+        g_isr_calls = 0;
+        rwd::hal_reset();
+        rwd::hal_attach(replay.ops());
+        rwd::hal_mode_replay();
+        rwd::hal_set_isr(3u, &isr_counting);
+
+        CHECK(rwd::mmio_read32(0x40000000u) == 7u);
+        CHECK(g_isr_calls == 0u);
+        RWD_SITE(7);
+        CHECK(g_isr_calls == 1u);   // delivered at the site, as recorded
+        CHECK(rwd::mmio_read32(0x40000000u) == 8u);
+        CHECK_FALSE(replay.diverged());
+        CHECK(replay.cursor() == 4u);
+        rwd::hal_reset();
+    }
+    SUBCASE("a different label is a divergence") {
+        rwd::hal_reset();
+        rwd::hal_attach(replay.ops());
+        rwd::hal_mode_replay();
+        rwd::mmio_read32(0x40000000u);
+        RWD_SITE(8);
+        REQUIRE(replay.diverged());
+        CHECK(replay.divergence().find("crossed site 8") != std::string::npos);
+        CHECK(replay.divergence().find("recorded site 7") != std::string::npos);
+        rwd::hal_reset();
+    }
+    SUBCASE("a site the recording never crossed is a divergence") {
+        rwd::hal_reset();
+        rwd::hal_attach(replay.ops());
+        rwd::hal_mode_replay();
+        RWD_SITE(7);                // the trace starts with an MMIO read
+        REQUIRE(replay.diverged());
+        CHECK(replay.divergence().find("trace has MMIO_READ") != std::string::npos);
+        rwd::hal_reset();
+    }
+    SUBCASE("a recorded site the firmware never crosses is a divergence") {
+        rwd::hal_reset();
+        rwd::hal_attach(replay.ops());
+        rwd::hal_mode_replay();
+        rwd::mmio_read32(0x40000000u);
+        rwd::mmio_read32(0x40000000u);   // the trace has a site here
+        REQUIRE(replay.diverged());
+        CHECK(replay.divergence().find("trace has SITE") != std::string::npos);
+        rwd::hal_reset();
+    }
+}

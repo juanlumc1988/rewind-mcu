@@ -203,6 +203,10 @@ bool TraceWriter::irq_enter_at(u64 ts, u32 vector, u32 return_pc) {
     return write_plain((u8)EV_IRQ_AT, ts, &vector, &return_pc);
 }
 
+bool TraceWriter::site(u64 ts, u32 site) {
+    return write_plain((u8)EV_SITE, ts, &site, 0);
+}
+
 bool TraceWriter::finish(u64 ts) {
     if (!started_ || finished_) {
         return false;

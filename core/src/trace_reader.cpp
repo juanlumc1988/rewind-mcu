@@ -171,13 +171,20 @@ bool TraceReader::next(Event* out) {
         case EV_IRQ_ENTER:  is_mmio = false; has_arg = true;  break;
         case EV_STOP:       is_mmio = false; has_arg = false; break;
         case EV_IRQ_AT:
-            // A version 2 writer never emits this, so seeing it there is a
-            // damaged or spliced trace, not an old one.
+            // An older writer never emits this, so seeing it in a version 2
+            // trace is a damaged or spliced trace, not an old one.
             if (hdr_.version < 3) {
                 done_ = true;
                 return fail("unknown event type");
             }
             is_mmio = false; has_arg = true; has_pc = true;
+            break;
+        case EV_SITE:
+            if (hdr_.version < 4) {
+                done_ = true;
+                return fail("unknown event type");
+            }
+            is_mmio = false; has_arg = true;
             break;
         default:
             done_ = true;

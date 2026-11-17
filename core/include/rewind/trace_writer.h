@@ -67,6 +67,9 @@ public:
     // finishes. Emits EV_IRQ_AT.
     bool irq_enter_at(u64 ts, u32 vector, u32 return_pc);
 
+    // Emits EV_SITE: the firmware crossed the probe point labelled `site`.
+    bool site(u64 ts, u32 site);
+
     // Emits EV_STOP, flushes the pending block and writes the terminator.
     bool finish(u64 ts);
 

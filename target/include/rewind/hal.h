@@ -47,6 +47,16 @@ struct HalOps {
     // access, which is where this model allows interrupts to land.
     u32  (*poll_irq)(void* ctx);
     void* ctx;
+    // Optional (may be null): the firmware crossed the probe point `id`. The
+    // simulator charges the cycles that stretch of code would take; replay
+    // consumes the matching event from the trace. Real hardware has nothing
+    // to do.
+    void (*site)(void* ctx, u32 id);
+
+    // Everything starts null, so a backend that does not know about a hook
+    // added later -- site was the first -- simply does not provide it, instead
+    // of leaving an uninitialised pointer for the shim to call.
+    HalOps() : read32(0), write32(0), now(0), poll_irq(0), ctx(0), site(0) {}
 };
 
 enum Mode {
@@ -106,6 +116,28 @@ void hal_record_irq_entry_at(u32 vector, u32 return_pc);
 // replay dispatch through HalOps::poll_irq instead and never call this.
 void hal_run_isr(u32 vector);
 
+// Probe points.
+//
+// An interrupt can only be replayed where the shim gets to run, and the shim
+// only runs at a peripheral access. A race whose whole window is computation
+// -- a shared counter loaded, adjusted and stored with no register touched in
+// between -- therefore has nowhere to land. A probe point is a place the
+// firmware declares in its own source that counts as one more crossing: it is
+// recorded (EV_SITE), replay consumes it in order and checks the label, and an
+// interrupt that the recording placed after it is delivered right there.
+//
+//     u32 tmp = g_shared;
+//     RWD_SITE(7);              // an interrupt may land here
+//     g_shared = tmp + 1;
+//
+// How exactly a replay can reproduce a race is how densely the sites are
+// placed around the code that races: an interrupt that landed between two
+// crossings is replayed after the earlier one. The label identifies the point;
+// give each site its own. Compile with REWIND_DISABLE_SITES to make RWD_SITE
+// vanish -- but a trace recorded with sites will not replay on a build without
+// them, which the replay reports as a divergence, as for any other mismatch.
+void hal_site(u32 id);
+
 // Instrumentation only. Under MODE_REPLAY this reports the timestamp of the
 // last consumed event, which tracks the recorded clock at every MMIO access
 // but not between them. Firmware that needs the time must read its timer
@@ -128,5 +160,11 @@ const char* hal_divergence();
 void        hal_set_divergence(const char* why);
 
 } // namespace rwd
+
+#if defined(REWIND_DISABLE_SITES)
+#define RWD_SITE(id) ((void)0)
+#else
+#define RWD_SITE(id) ::rwd::hal_site(id)
+#endif
 
 #endif // REWIND_HAL_H

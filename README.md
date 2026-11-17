@@ -176,7 +176,7 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
 | `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `tests/`    | 104 cases, 5.2 million assertions              | C++17 |
+| `tests/`    | 118 cases, 5.2 million assertions              | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -268,6 +268,19 @@ over, so the delta is usually zero and costs one. That single change took the
 example trace from 9.2 bytes per event to **5.3** — on a device shipping
 traces over a 115200 baud UART, the difference between viable and not.
 
+### Probe points
+
+An interrupt can only be replayed where the shim runs, which is at a peripheral
+access, so a race whose window is pure computation has nowhere to land. Mark the
+window with `RWD_SITE(id)` and it becomes one more place the shim runs: the
+crossing is recorded, replay checks it in order, and an interrupt recorded after
+it is delivered there. A load-add-store with a probe point in it loses an update
+on some simulator seeds and not others, and the seeds that lose one replay
+from the trace alone and lose the same one (`tests/test_sites.cpp`). The
+example firmware does not use them yet, and a window with no probe point in it
+is still out of reach. See
+[`docs/design/execution-model.md`](docs/design/execution-model.md).
+
 The header carries a `build_id`. Replaying a trace against a different
 firmware build is the fastest way to spend an afternoon chasing a bug that is
 not there, so it is refused.
@@ -302,18 +315,18 @@ Built for a Cortex-M4 at `-Os`, measured in CI on every push:
 
 | Object | text (flash) | bss |
 |---|---:|---:|
-| `trace_writer.cpp` | 1092 | 0 |
-| `hal.cpp` | 741 | 50 |
+| `trace_writer.cpp` | 1114 | 0 |
+| `hal.cpp` | 825 | 50 |
 | `ring_buffer.cpp` | 334 | 0 |
 | `recorder.cpp` | 278 | 0 |
 | `varint.cpp` | 166 | 0 |
 | `crc32.cpp` | 140 | 0 |
-| `cortex_m.cpp` | 154 | 0 |
+| `cortex_m.cpp` | 170 | 0 |
 | `clock.cpp` | 98 | 0 |
-| **recording total** | **3003** | **50** |
-| `trace_reader.cpp` | 1704 | 0 |
+| **recording total** | **3125** | **50** |
+| `trace_reader.cpp` | 1712 | 0 |
 
-**Roughly 3.0 KB of flash and 50 bytes of .bss to record.** The reader is
+**Roughly 3.1 KB of flash and 50 bytes of .bss to record.** The reader is
 only linked in if the device replays its own traces — useful after a
 watchdog reset, and discarded by `--gc-sections` otherwise.
 
@@ -391,9 +404,11 @@ Stated plainly, because the gap between this and the pitch is real:
   rather than replayed wrongly. The first half of the fix is done: a vector
   entry declared with `RWD_CORTEX_M_ISR` records the return address from the
   exception frame (`EV_IRQ_AT`), and the trampoline has been run on an
-  emulated Cortex-M4 (`tests/qemu`), though not on a part. The second half is not: that
-  address belongs to the device build, so replay has nothing yet to stop on.
-  See [`docs/design/execution-model.md`](docs/design/execution-model.md).
+  emulated Cortex-M4 (`tests/qemu`), though not on a part. The address belongs to the
+  device build, so replay cannot stop on it; what it can stop on are probe
+  points (`RWD_SITE`), which the simulator and replay honour. What is missing
+  is using them: the example firmware has none, and on a part nothing yet
+  checks that they are dense enough to cover the race. See [`docs/design/execution-model.md`](docs/design/execution-model.md).
 - **Reverse execution stops at iteration boundaries for checkpoints.** Seeks
   land on an exact event, but a checkpoint can only be taken where no call is
   in progress. Fine here; a firmware with a deeply nested main loop would
@@ -402,15 +417,17 @@ Stated plainly, because the gap between this and the pitch is real:
   simulated UART. No SWO, RTT or real UART driver ships here.
 - **No DMA.** The event type is designed and not implemented.
 - **No GUI.** Timeline scrubbing and trace diffing are the eventual Qt layer.
-- **CPU overhead is unmeasured.** Flash cost is now measured in CI (3.0 KB to
+- **CPU overhead is unmeasured.** Flash cost is now measured in CI (3.1 KB to
   record), but the <2% runtime target is still a design goal with no number
   behind it. It cannot get one without a part to run on.
 
 ## Roadmap
 
 1. Re-enter a handler where hardware actually did. The return address is
-   recorded; replay still needs a position it can stop on. This is what makes
-   hardware traces replay.
+   recorded and probe points give replay places to stop; what is left is
+   using them on the example firmware and checking, from the recorded
+   address, that they were dense enough. This is what makes hardware traces
+   replay.
 2. Run it on a part: a UART or RTT transport, and a measured overhead number
    held in CI.
 3. DMA events.

@@ -775,3 +775,92 @@ TEST_CASE("a malformed return address is rejected") {
         CHECK(std::string(reader.error()).find("32 bits") != std::string::npos);
     }
 }
+
+// -- probe points (EV_SITE) --
+
+TEST_CASE("a probe point round-trips through writer and reader") {
+    rwhost::VectorSink sink;
+    rwd::TraceWriter   writer;
+    u8                 block[rwd::kMinBlockBuffer];
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 1, 2, 0));
+    REQUIRE(writer.mmio_read(5, 0x40001000u, 9u));
+    REQUIRE(writer.site(8, 7u));
+    REQUIRE(writer.site(8, 0xFFFFFFFFu));   // same instant, widest label
+    REQUIRE(writer.mmio_read(12, 0x40001004u, 3u));
+    REQUIRE(writer.finish(20));
+
+    const std::vector<rwd::Event> events = read_all(sink.bytes);
+    REQUIRE(events.size() == 5u);
+    CHECK(events[1].type  == rwd::EV_SITE);
+    CHECK(events[1].ts    == 8u);
+    CHECK(events[1].addr  == 7u);        // the label
+    CHECK(events[1].value == 0u);
+    CHECK(events[2].type  == rwd::EV_SITE);
+    CHECK(events[2].addr  == 0xFFFFFFFFu);
+    // Not an access: the address predictor must carry on from the read.
+    CHECK(events[3].addr  == 0x40001004u);
+}
+
+TEST_CASE("EV_SITE inside an older trace is refused") {
+    rwhost::VectorSink sink;
+    rwd::TraceWriter   writer;
+    u8                 block[rwd::kMinBlockBuffer];
+    REQUIRE(writer.begin(&rwhost::VectorSink::write, &sink, block,
+                         sizeof(block), 1, 2, 0));
+    REQUIRE(writer.site(1, 4u));
+    REQUIRE(writer.finish(2));
+
+    for (u16 old_version = 2; old_version <= 3; ++old_version) {
+        CAPTURE(old_version);
+        std::vector<u8> trace = sink.bytes;
+        rwd::put_u16_le(trace.data() + 4, old_version);
+
+        rwd::TraceReader reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+        rwd::Event ev;
+        while (reader.next(&ev)) {
+        }
+        CHECK_FALSE(reader.ok());
+        CHECK(std::string(reader.error()).find("unknown event type") != std::string::npos);
+    }
+}
+
+TEST_CASE("a malformed probe point is rejected") {
+    SUBCASE("label missing") {
+        std::vector<u8> payload;
+        payload.push_back((u8)rwd::EV_SITE);
+        append_varint(&payload, 0u);   // delta_ts, and then the payload ends
+
+        const std::vector<u8> trace = handmade_trace(payload);
+        rwd::TraceReader      reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+        rwd::Event ev;
+        CHECK_FALSE(reader.next(&ev));
+        CHECK_FALSE(reader.ok());
+    }
+    SUBCASE("label wider than 32 bits") {
+        std::vector<u8> payload;
+        payload.push_back((u8)rwd::EV_SITE);
+        append_varint(&payload, 0u);
+        append_varint(&payload, 0x100000000ULL);
+
+        const std::vector<u8> trace = handmade_trace(payload);
+        rwd::TraceReader      reader;
+        REQUIRE(reader.open(trace.data(), (u32)trace.size()));
+        rwd::Event ev;
+        CHECK_FALSE(reader.next(&ev));
+        CHECK_FALSE(reader.ok());
+        CHECK(std::string(reader.error()).find("32 bits") != std::string::npos);
+    }
+}
+
+TEST_CASE("every version from the oldest supported to the current one opens") {
+    for (u16 v = rwd::kTraceMinVersion; v <= rwd::kTraceVersion; ++v) {
+        CAPTURE(v);
+        Recorded rec = make_trace(8);
+        rwd::put_u16_le(rec.bytes.data() + 4, v);
+        rwd::TraceReader reader;
+        CHECK(reader.open(rec.bytes.data(), (u32)rec.bytes.size()));
+    }
+}

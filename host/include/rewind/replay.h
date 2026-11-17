@@ -81,6 +81,7 @@ private:
     u32  read32(u32 addr);
     void write32(u32 addr, u32 value);
     u32  poll_irq();
+    void site(u32 id);
     void diverge(const char* fmt, ...);
     void maybe_capture();
 
@@ -88,6 +89,7 @@ private:
     static void s_write32(void* ctx, u32 addr, u32 value);
     static u64  s_now(void* ctx);
     static u32  s_poll_irq(void* ctx);
+    static void s_site(void* ctx, u32 id);
 
     ReplayHal(const ReplayHal&);
     ReplayHal& operator=(const ReplayHal&);

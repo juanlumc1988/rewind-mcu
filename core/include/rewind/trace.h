@@ -39,6 +39,7 @@
 //   EV_MMIO_WRITE  delta_ts, delta_addr, value
 //   EV_IRQ_ENTER   delta_ts, vector
 //   EV_IRQ_AT      delta_ts, vector, return_pc      (version 3)
+//   EV_SITE        delta_ts, site_id                (version 4)
 //   EV_STOP        delta_ts
 //
 // EV_IRQ_AT is EV_IRQ_ENTER plus the address the CPU will return to: the PC
@@ -47,6 +48,12 @@
 // it; one that cannot (the simulator, where the shim dispatches) emits plain
 // EV_IRQ_ENTER. The address belongs to the build that recorded it, which is
 // what build_id is for. Version 2 traces have no EV_IRQ_AT and still read.
+//
+// EV_SITE marks the firmware crossing a probe point (RWD_SITE in hal.h): a
+// place the firmware declares in its source where an interrupt may be
+// replayed, between peripheral accesses. It carries a label the firmware
+// chose, so replay can check it is crossing the same point the recording did.
+// Versions 2 and 3 have no EV_SITE and still read.
 //
 // Two fields are deltas against the previous event, across the whole stream
 // rather than per block, and both earn their keep:
@@ -76,7 +83,7 @@ namespace rwd {
 
 // Stored little-endian, so byte 0 is 'R' (0x52) and byte 3 is 'D' (0x44).
 const u32 kTraceMagic      = 0x444E5752u;
-const u16 kTraceVersion    = 3;
+const u16 kTraceVersion    = 4;
 const u16 kTraceMinVersion = 2;   // oldest version the reader still accepts
 const u32 kTraceHeaderSize = 32;
 
@@ -88,7 +95,8 @@ enum EventType {
     EV_MMIO_WRITE = 0x02,
     EV_IRQ_ENTER  = 0x03,
     EV_STOP       = 0x04,
-    EV_IRQ_AT     = 0x05
+    EV_IRQ_AT     = 0x05,
+    EV_SITE       = 0x06
 };
 
 enum TraceFlags {
@@ -114,6 +122,7 @@ struct Event {
     u8  type;
     u64 ts;
     u32 addr;   // EV_MMIO_*: address.  EV_IRQ_*: vector number.
+                // EV_SITE: the site label.
     u32 value;  // EV_MMIO_*: value.    EV_IRQ_AT: return address.
                 // Otherwise zero.
 };

@@ -71,26 +71,57 @@ elsewhere.
 
 ### Stopping on it
 
-Not done, and not as simple as it looks. The address is a location in the
-*device* binary. Replay runs the firmware compiled for the *host*, where that
-address means nothing, so there is nothing to compare it with. What replay
-needs is a coordinate for "where in the run" that is the same in both builds.
+The address is a location in the *device* binary. Replay runs the firmware
+compiled for the *host*, where that address means nothing, so there is nothing
+to compare it with. What replay needs is a coordinate for "where in the run"
+that is the same in both builds.
 
 The existing one is the order of MMIO accesses, and it is exact but coarse:
 it says the interrupt came between access *k* and *k+1*, not where in the
-computation between them. The straightforward refinement is more places to
-stop: explicit probe points in the firmware that cross the shim like an MMIO
-access does, counted identically on the device and the host. Precision is then
-a matter of how densely they are placed. The recorded address stays useful as
-a check: it can say how far past the last probe an interrupt landed, and so
-whether the probes were dense enough to reproduce a given race.
+computation between them. The refinement is more places to stop.
+
+### Probe points
+
+Implemented. `RWD_SITE(id)` in the firmware is one more crossing of the shim,
+like an MMIO access: it is recorded as `EV_SITE`, replay consumes it in trace
+order and checks the label (a missing site, an extra one or a different label
+is a divergence like any other), and a pending interrupt is delivered right
+after it. The label is the firmware's own, identical on the device and the
+host, so nothing has to be translated between builds.
+
+```cpp
+const u32 tmp = g_shared;
+RWD_SITE(7);                  // an interrupt may land here
+g_shared = tmp + 1;
+```
+
+`tests/test_sites.cpp` is the demonstration. A load-add-store with no register
+access in it cannot lose an update without a probe point: across sixty seeds
+the interrupt never lands in the window. With one inside it, about half the
+seeds lose an update and half do not (32 and 28 when this was written): an
+intermittent bug. A run that lost one replays from its trace alone and loses
+the same one. A critical
+section still keeps the interrupt out, probe point or not.
+
+How exactly a replay can reproduce a race is how densely the sites are placed
+around the code that races. An interrupt that landed between two crossings is
+replayed after the earlier one, so a window with no site in it is still out of
+reach. A site costs one event in the trace (about three bytes) and, outside
+recording, a call and a branch; `REWIND_DISABLE_SITES` removes it.
+
+Two things this does not do yet. The example firmware has no sites, so the
+README demo and its numbers are unchanged. And on a part, an interrupt that
+landed between two sites is replayed after the earlier one with nothing
+checking that the sites were dense enough: the recorded return address could
+say how far past the last site it landed, and flag a window the sites did not
+cover. That check is not written.
+
+### Finding the landing
 
 Past that, the trace is itself an oracle. Candidate landing points between two
-accesses are few, and replay already knows how to rewind cheaply and detect a
+crossings are few, and replay already knows how to rewind cheaply and detect a
 divergence, so a landing can be found by trying candidates and keeping the one
-the rest of the trace agrees with.
-
-Neither is built yet.
+the rest of the trace agrees with. Not built.
 
 Under the simulator the question does not arise, because the simulator has
 no way to interrupt except through the shim. Traces recorded there replay
@@ -114,9 +145,9 @@ embedded C++ and the one the example firmware demonstrates.
 
 **What it misses.** A race whose entire window is pure computation — a
 shared counter incremented and stored with no peripheral access in between —
-is invisible to this model. A finer model would need instrumentation at
-basic-block granularity, which costs far more than 2% and is a different
-project.
+is invisible to this model unless a probe point is placed in the window (see
+*Probe points* below). Making every basic block a crossing would need
+instrumentation that costs far more than 2% and is a different project.
 
 Handlers are non-reentrant: while one is running, the shim dispatches no
 others. Real hardware nests by priority. Modelling that needs a priority

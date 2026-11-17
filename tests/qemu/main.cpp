@@ -115,7 +115,11 @@ __attribute__((naked)) void run_on_psp(__attribute__((unused)) void (*fn)(),
 }
 
 static bool one_run(const char* name, bool psp) {
-    static const rwd::HalOps ops = { &rd, &wr, &nw, &pl, 0 };
+    // Not static: with a constructor, a function-local static would need the
+    // C++ runtime's thread-safe-init guard. It is detached by hal_reset()
+    // before this function returns, so a local is enough.
+    rwd::HalOps ops;
+    ops.read32 = &rd; ops.write32 = &wr; ops.now = &nw; ops.poll_irq = &pl;
     rwd::TraceWriter writer;
     g_trace_len = 0; g_clock = 0; g_isr_calls = 0;
 
