@@ -176,7 +176,7 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
 | `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `tests/`    | 124 cases, 5.2 million assertions              | C++17 |
+| `tests/`    | 133 cases, 5.2 million assertions              | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -281,7 +281,9 @@ example firmware's `unguarded` variant uses one: it subtracts what it handled
 without a critical section, a race with no register access in its window, and
 `rewind hunt --variant unguarded` finds it (85 of 1000 seeds, against 419 for
 `buggy` and none for `fixed`). A window with no probe point in it is still out
-of reach. See
+of reach, and `rewind landings FILE` says where that happened on a trace from a
+part: for each interrupt, how many cycles after the last crossing it was taken,
+and the return address to look the code up by. See
 [`docs/design/execution-model.md`](docs/design/execution-model.md).
 
 The header carries a `build_id`. Replaying a trace against a different
@@ -407,11 +409,13 @@ Stated plainly, because the gap between this and the pitch is real:
   rather than replayed wrongly. The first half of the fix is done: a vector
   entry declared with `RWD_CORTEX_M_ISR` records the return address from the
   exception frame (`EV_IRQ_AT`), and the trampoline has been run on an
-  emulated Cortex-M4 (`tests/qemu`), though not on a part. The address belongs to the
-  device build, so replay cannot stop on it; what it can stop on are probe
-  points (`RWD_SITE`), which the simulator and replay honour. What is missing
-  is using them: the example firmware has none, and on a part nothing yet
-  checks that they are dense enough to cover the race. See [`docs/design/execution-model.md`](docs/design/execution-model.md).
+  emulated Cortex-M4 (`tests/qemu`), though not on a part. The address belongs
+  to the device build, so replay cannot stop on it; what it can stop on are
+  probe points (`RWD_SITE`), which the simulator and replay honour and the
+  example firmware's `unguarded` variant uses. `rewind landings` reports the
+  interrupts that landed too far from any crossing; it has not been calibrated
+  on a part. See
+  [`docs/design/execution-model.md`](docs/design/execution-model.md).
 - **Reverse execution stops at iteration boundaries for checkpoints.** Seeks
   land on an exact event, but a checkpoint can only be taken where no call is
   in progress. Fine here; a firmware with a deeply nested main loop would
@@ -427,9 +431,9 @@ Stated plainly, because the gap between this and the pitch is real:
 ## Roadmap
 
 1. Re-enter a handler where hardware actually did. The return address is
-   recorded and probe points give replay places to stop; what is left is
-   using them on the example firmware and checking, from the recorded
-   address, that they were dense enough. This is what makes hardware traces
+   recorded, probe points give replay places to stop, and `rewind landings`
+   reports where they were not dense enough. What is left is searching for
+   the landing when they were not. This is what makes hardware traces
    replay.
 2. Run it on a part: a UART or RTT transport, and a measured overhead number
    held in CI.

@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "rewind/landings.h"
 #include "rewind/session.h"
 #include "rewind/timeline.h"
 #include "rewind/trace_reader.h"
@@ -35,6 +36,7 @@ int usage() {
         "  rewind sizing [--seed N] [--drain N] [--fifo N] [--slices N]\n"
         "  rewind inspect FILE [--at N] [--walk M] [--stride K]\n"
         "                      [--find-consumed N] [--iters N]\n"
+        "  rewind landings FILE [--threshold N] [--limit N]\n"
         "\n"
         "common options:\n"
         "  --seed N      simulator seed; picks the interrupt arrival schedule\n"
@@ -48,6 +50,13 @@ int usage() {
         "                recording when replaying.\n"
         "  --no-writes   omit MMIO writes from the trace: smaller, but replay\n"
         "                loses its consistency check\n"
+        "\n"
+        "landings -- where each interrupt landed, from the clock in the trace:\n"
+        "  --threshold N     report interrupts taken more than N cycles after\n"
+        "                    the last crossing (default 64: above a Cortex-M's\n"
+        "                    interrupt entry latency; a guess, not calibrated\n"
+        "                    on a part)\n"
+        "  --limit N         list at most N of them (default 20)\n"
         "\n"
         "inspect options -- reverse execution over a recorded run:\n"
         "  --at N            go to event N (default: the end of the run)\n"
@@ -143,6 +152,7 @@ struct Args {
     u32         tx       = 24;
     u32         iters    = 6000;
     u32         limit    = 0;
+    u64         threshold = rwhost::kDefaultLandingThreshold;
     u32         drain    = 4096;
     u32         fifo     = 0xFFFFFFFFu;
     u32         slices   = 60;
@@ -179,6 +189,8 @@ Args parse(int argc, char** argv, int first) {
             a.tx = (u32)std::strtoul(argv[++i], 0, 10);
         } else if (opt == "--iters" && has_value) {
             a.iters = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--threshold" && has_value) {
+            a.threshold = std::strtoull(argv[++i], 0, 10);
         } else if (opt == "--limit" && has_value) {
             a.limit = (u32)std::strtoul(argv[++i], 0, 10);
         } else if (opt == "--drain" && has_value) {
@@ -556,6 +568,103 @@ int cmd_dump(const Args& a) {
 
 } // namespace
 
+// Where each interrupt landed, relative to where replay can deliver it.
+int cmd_landings(const Args& a) {
+    if (a.file.empty()) {
+        std::fprintf(stderr, "rewind: landings needs a trace file\n");
+        return 2;
+    }
+    std::vector<rwd::u8> bytes;
+    if (!read_file(a.file.c_str(), &bytes)) {
+        return 1;
+    }
+    rwd::TraceReader reader;
+    if (!reader.open(bytes.data(), (u32)bytes.size())) {
+        std::fprintf(stderr, "rewind: %s\n", reader.error());
+        return 1;
+    }
+    std::vector<rwd::Event> events;
+    rwd::Event              ev;
+    while (reader.next(&ev)) {
+        events.push_back(ev);
+    }
+    if (!reader.ok()) {
+        std::fprintf(stderr, "rewind: %s\n", reader.error());
+        return 1;
+    }
+
+    const std::vector<rwhost::Landing> landings = rwhost::find_landings(events);
+    const rwhost::LandingStats         stats    = rwhost::summarize_landings(landings, a.threshold);
+
+    std::printf("%zu interrupts in %zu events\n", stats.count, events.size());
+    if (stats.count == 0) {
+        return 0;
+    }
+    std::printf("\n"
+                "Replay delivers an interrupt right after the last crossing before it\n"
+                "(an MMIO access or a probe point). Slack is the cycles between that\n"
+                "crossing and the interrupt: code that ran before the interrupt on the\n"
+                "device, and runs after its handler in replay.\n\n");
+    std::printf("  within %llu cycles : %zu\n", (unsigned long long)a.threshold,
+                stats.count - stats.over);
+    std::printf("  over   %llu cycles : %zu   (largest %llu, median %llu)\n",
+                (unsigned long long)a.threshold, stats.over,
+                (unsigned long long)stats.max_slack,
+                (unsigned long long)stats.median_slack);
+
+    if (stats.max_slack == 0 && stats.with_pc == 0) {
+        std::printf("\nEvery interrupt was taken right after a crossing and none carries a\n"
+                    "return address: this looks like a simulator trace, where an interrupt\n"
+                    "cannot land anywhere else. There is nothing to report.\n");
+        return 0;
+    }
+    if (stats.over == 0) {
+        std::printf("\nNo interrupt landed more than %llu cycles after a crossing.\n",
+                    (unsigned long long)a.threshold);
+        return 0;
+    }
+
+    const u32 shown_max = a.limit != 0 ? a.limit : 20;
+    u32       shown     = 0;
+    std::printf("\n%7s %11s %4s %7s  %-30s %s\n", "event", "cycle", "vec", "slack",
+                "after", "returns to");
+    for (std::size_t i = 0; i < landings.size() && shown < shown_max; ++i) {
+        const rwhost::Landing& l = landings[i];
+        if (l.slack <= a.threshold) {
+            continue;
+        }
+        ++shown;
+
+        char after[64];
+        if (!l.has_crossing) {
+            std::snprintf(after, sizeof(after), "(start of the trace)");
+        } else if (l.crossing_type == rwd::EV_SITE) {
+            std::snprintf(after, sizeof(after), "site %u", l.crossing_addr);
+        } else {
+            std::snprintf(after, sizeof(after), "%s 0x%08X %s",
+                          l.crossing_type == rwd::EV_MMIO_READ ? "read" : "write",
+                          l.crossing_addr, register_name(l.crossing_addr));
+        }
+        char pc[16] = "-";
+        if (l.has_pc) {
+            std::snprintf(pc, sizeof(pc), "0x%08X", l.pc);
+        }
+        std::printf("%7zu %11llu %4u %7llu  %-30s %s\n", l.event,
+                    (unsigned long long)l.ts, l.vector,
+                    (unsigned long long)l.slack, after, pc);
+    }
+    if (stats.over > shown) {
+        std::printf("... %zu more (raise --limit)\n", stats.over - shown);
+    }
+
+    std::printf("\nWhether that matters depends on whether the code that ran in those\n"
+                "cycles touches state the handler shares. If it does, replay will not\n"
+                "reproduce the run and will usually say so (a checked write or read\n"
+                "comes out different). Put an RWD_SITE in that code; where it is, the\n"
+                "return address says: arm-none-eabi-addr2line -e <firmware.elf> <address>.\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         return usage();
@@ -578,6 +687,7 @@ int main(int argc, char** argv) {
     if (command == "dump")   return cmd_dump(args);
     if (command == "sizing") return cmd_sizing(args);
     if (command == "inspect") return cmd_inspect(args);
+    if (command == "landings") return cmd_landings(args);
 
     std::fprintf(stderr, "rewind: unknown command '%s'\n", command.c_str());
     return usage();

@@ -116,11 +116,26 @@ an interrupt directly after the site (`tests/test_unguarded.cpp`). Only that
 variant crosses the site, so the other two variants and the numbers quoted for
 them are unchanged.
 
-One thing this does not do yet. On a part, an interrupt that
-landed between two sites is replayed after the earlier one with nothing
-checking that the sites were dense enough: the recorded return address could
-say how far past the last site it landed, and flag a window the sites did not
-cover. That check is not written.
+### Checking the density
+
+On a part, an interrupt that landed between two crossings is replayed after the
+earlier one, and nothing in replay itself says whether that was close enough.
+`rewind landings` does. The trace already carries the clock on every event, so
+the distance from the last crossing to the interrupt -- the slack, in cycles --
+needs no return address: it is how much code ran before the hardware took the
+interrupt and runs after the handler in replay. The report lists the interrupts
+whose slack is over a threshold, with the crossing each follows and, when the
+trace has one, the return address, which says where that code is
+(`arm-none-eabi-addr2line -e firmware.elf <address>`).
+
+It is a diagnostic, not a verdict. Slack says code ran in the gap, not that the
+code touches anything the handler shares: an interrupt that lands while the
+firmware idles has a large slack and costs nothing. And the default threshold
+(64 cycles, above a Cortex-M's entry latency and a handler prologue) is a
+guess: nothing here has been calibrated on a part, and a simulator trace has no
+slack at all, because the simulator can only interrupt right after a crossing.
+`tests/test_landings.cpp` builds hardware-shaped traces by hand for that
+reason.
 
 ### Finding the landing
 
