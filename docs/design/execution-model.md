@@ -109,19 +109,82 @@ replayed after the earlier one, so a window with no site in it is still out of
 reach. A site costs one event in the trace (about three bytes) and, outside
 recording, a call and a branch; `REWIND_DISABLE_SITES` removes it.
 
-Two things this does not do yet. The example firmware has no sites, so the
-README demo and its numbers are unchanged. And on a part, an interrupt that
-landed between two sites is replayed after the earlier one with nothing
-checking that the sites were dense enough: the recorded return address could
-say how far past the last site it landed, and flag a window the sites did not
-cover. That check is not written.
+The example firmware uses one. Its `unguarded` variant is the fix that is not
+one: it subtracts what it handled, outside a critical section. `rewind hunt
+--variant unguarded` finds it on 85 of 1000 seeds, and every one of those has
+an interrupt directly after the site (`tests/test_unguarded.cpp`). Only that
+variant crosses the site, so the other two variants and the numbers quoted for
+them are unchanged.
+
+### Checking the density
+
+On a part, an interrupt that landed between two crossings is replayed after the
+earlier one, and nothing in replay itself says whether that was close enough.
+`rewind landings` does. The trace already carries the clock on every event, so
+the distance from the last crossing to the interrupt -- the slack, in cycles --
+needs no return address: it is how much code ran before the hardware took the
+interrupt and runs after the handler in replay. The report lists the interrupts
+whose slack is over a threshold, with the crossing each follows and, when the
+trace has one, the return address, which says where that code is
+(`arm-none-eabi-addr2line -e firmware.elf <address>`).
+
+It is a diagnostic, not a verdict. Slack says code ran in the gap, not that the
+code touches anything the handler shares: an interrupt that lands while the
+firmware idles has a large slack and costs nothing. And the default threshold
+(64 cycles, above a Cortex-M's entry latency and a handler prologue) is a
+guess: nothing here has been calibrated on a part, and a simulator trace has no
+slack at all, because the simulator can only interrupt right after a crossing.
+`tests/test_landings.cpp` builds hardware-shaped traces by hand for that
+reason.
 
 ### Finding the landing
 
-Past that, the trace is itself an oracle. Candidate landing points between two
-crossings are few, and replay already knows how to rewind cheaply and detect a
-divergence, so a landing can be found by trying candidates and keeping the one
-the rest of the trace agrees with. Not built.
+Past that, the trace is itself an oracle. A trace recorded without its probe
+points (`kFlagNoSites`: compiled out on the device, which is the normal case on
+a part) says that an interrupt came after crossing A and before crossing B, and
+no more. In replay the same `RWD_SITE`s are then not crossings to match against
+the trace but *candidate* places to deliver it, and `rewind locate` tries them.
+
+Each interrupt is held back until a number of probe points have gone by since
+the last crossing (0 is the default: right after the crossing). The recorded
+reads and writes that follow are the check: a placement that matches the real
+landing reproduces them, and one that does not makes the firmware read or
+write something the trace does not have, at which point replay diverges. The
+search is depth-first with backtracking over the interrupts in order, and each
+placement is judged by where the *first* divergence happens (the firmware keeps
+running after one, and its loop can fall back into step by luck, so the cursor
+at the end of a run says nothing). A placement fits if the replay gets past the
+next interrupt or to the end; the last interrupt must replay to the end.
+Backtracking is what handles two interrupts close together, where the effect of
+the first shows only after the second.
+
+On the example firmware, `rewind hunt --variant unguarded --no-sites` records a
+failure the way a part would. Replay alone diverges at the first write that
+depends on the lost update. `rewind locate` finds the one interrupt that landed
+inside the window, places the other twenty-three right after their crossings,
+and reproduces the recording exactly: the same checksum and state hash as the
+run that kept its sites (`tests/test_unguarded.cpp`). `rewind landings
+--threshold 0` independently names the same interrupt, from the clock alone.
+
+What it does not do:
+
+- **It cannot tell apart what the trace cannot.** A placement that changes
+  nothing a register read or a recorded write ever shows is indistinguishable
+  from the real one. After finding a solution, each interrupt is tried at its
+  other placements with everything else held; any that also reproduces the
+  whole trace makes it *ambiguous*, and the earliest is kept. Two interrupts
+  close together can swap without the trace noticing, so those are often
+  ambiguous, and that is the right answer. It also needs writes to be
+  recorded: with `--no-writes` the oracle is the reads alone.
+- **It can only choose among the probe points the host build has.** If the real
+  landing was somewhere with none, no placement fits, the first such interrupt
+  is reported unresolved and the replay still diverges. The fix is a probe
+  point there; `rewind landings` says where to look.
+- **It is a search over replays of the whole trace.** The cost is the number of
+  runs times the length of the trace: about fifty replays of six thousand events
+  here, nothing. A long recording would want to resume from checkpoints, as
+  reverse execution does; it does not yet. `max_runs` stops a search that gets
+  out of hand and says so.
 
 Under the simulator the question does not arise, because the simulator has
 no way to interrupt except through the shim. Traces recorded there replay

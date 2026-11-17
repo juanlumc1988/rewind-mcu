@@ -31,7 +31,9 @@ const char* event_name(u8 type) {
 } // namespace
 
 ReplayHal::ReplayHal()
-    : cursor_(0), now_(0), capture_at_(0), capture_fn_(0), capture_ctx_(0),
+    : cursor_(0), now_(0), divergence_cursor_(0), sites_recorded_(true),
+      probe_count_(0),
+      capture_at_(0), capture_fn_(0), capture_ctx_(0),
       captured_(false), events_served_(0), check_writes_(false) {
     ops_.read32   = &ReplayHal::s_read32;
     ops_.write32  = &ReplayHal::s_write32;
@@ -62,6 +64,7 @@ bool ReplayHal::load(const u8* data, std::size_t len) {
 
     header_       = reader.header();
     check_writes_ = (header_.flags & rwd::kFlagRecordWrites) != 0;
+    sites_recorded_ = (header_.flags & rwd::kFlagNoSites) == 0;
 
     events_.clear();
     rwd::Event ev;
@@ -91,9 +94,29 @@ void ReplayHal::clear_capture_point() {
     captured_    = false;
 }
 
+void ReplayHal::set_landing(std::size_t event, u32 probes) {
+    landings_[event] = probes;
+}
+
+void ReplayHal::clear_landings() {
+    landings_.clear();
+}
+
+void ReplayHal::restart() {
+    cursor_      = 0;
+    now_         = 0;
+    probe_count_ = 0;
+    captured_    = false;
+    divergence_cursor_ = 0;
+    divergence_.clear();
+    detail_[0] = '\0';
+}
+
 void ReplayHal::set_cursor(std::size_t cursor, u64 now) {
-    cursor_ = cursor;
-    now_    = now;
+    cursor_      = cursor;
+    now_         = now;
+    probe_count_ = 0;
+    divergence_cursor_ = 0;
     divergence_.clear();
     detail_[0] = '\0';
 }
@@ -117,7 +140,8 @@ void ReplayHal::diverge(const char* fmt, ...) {
     std::vsnprintf(detail_, sizeof(detail_), fmt, args);
     va_end(args);
 
-    divergence_ = detail_;
+    divergence_        = detail_;
+    divergence_cursor_ = cursor_;
     rwd::hal_set_divergence(detail_);
 }
 
@@ -152,6 +176,7 @@ u32 ReplayHal::read32(u32 addr) {
     ++cursor_;
     ++events_served_;
     now_ = ev.ts;
+    probe_count_ = 0;   // a crossing: candidate positions count from here
     return ev.value;
 }
 
@@ -192,6 +217,7 @@ void ReplayHal::write32(u32 addr, u32 value) {
     ++cursor_;
     ++events_served_;
     now_ = ev.ts;
+    probe_count_ = 0;   // a crossing: candidate positions count from here
 }
 
 u32 ReplayHal::poll_irq() {
@@ -207,10 +233,19 @@ u32 ReplayHal::poll_irq() {
     if (ev.type != rwd::EV_IRQ_ENTER && ev.type != rwd::EV_IRQ_AT) {
         return rwd::kNoIrq;
     }
+    // Told to hold this one back until a number of probe points have gone by
+    // since the last crossing? Not yet. (>= rather than ==: if the planned
+    // probe went by while interrupts were masked, it is delivered as soon as
+    // they are not.)
+    const std::map<std::size_t, u32>::const_iterator plan = landings_.find(cursor_);
+    if (plan != landings_.end() && probe_count_ < plan->second) {
+        return rwd::kNoIrq;
+    }
 
     ++cursor_;
     ++events_served_;
     now_ = ev.ts;
+    probe_count_ = 0;   // a crossing: candidate positions count from here
     return ev.addr;   // vector number
 }
 
@@ -219,6 +254,14 @@ u32 ReplayHal::poll_irq() {
 // else -- no site in the trace, a different label, the trace already over --
 // means this is not the run that was recorded.
 void ReplayHal::site(u32 id) {
+    if (!sites_recorded_) {
+        // The recorder did not keep its sites, so the trace has no event for
+        // this one. It is not a crossing; it is a place a held-back interrupt
+        // may be delivered, and the shim will ask for it right after this.
+        ++probe_count_;
+        return;
+    }
+
     maybe_capture();
 
     if (cursor_ >= events_.size()) {
@@ -247,6 +290,7 @@ void ReplayHal::site(u32 id) {
     ++cursor_;
     ++events_served_;
     now_ = ev.ts;
+    probe_count_ = 0;   // a crossing: candidate positions count from here
 }
 
 u32  ReplayHal::s_read32(void* ctx, u32 addr) { return static_cast<ReplayHal*>(ctx)->read32(addr); }

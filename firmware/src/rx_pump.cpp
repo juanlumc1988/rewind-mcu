@@ -106,6 +106,13 @@ void rx_pump_run(Variant variant, u32 main_iters) {
             rwd::hal_irq_disable();
             g_state.pending -= n;      // subtract what we handled
             rwd::hal_irq_enable();
+        } else if (variant == kUnguarded) {
+            // Right operation, no critical section: an interrupt between the
+            // load and the store has its increment overwritten. No register
+            // is touched in the window, so only a probe point can land one.
+            const u32 p = g_state.pending;
+            RWD_SITE(kSitePendingRmw);
+            g_state.pending = p - n;
         } else {
             g_state.pending = 0;       // BUG: erases anything the ISR added
                                        // while the drain loop was running

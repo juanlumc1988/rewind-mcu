@@ -99,12 +99,20 @@ BufferedResult record_buffered(const BufferedConfig& cfg) {
 }
 
 u64 build_id_for(fw::Variant variant) {
-    return (variant == fw::kFixed) ? kBuildIdFixed : kBuildIdBuggy;
+    switch (variant) {
+        case fw::kFixed:     return kBuildIdFixed;
+        case fw::kUnguarded: return kBuildIdUnguarded;
+        default:             return kBuildIdBuggy;
+    }
 }
 
 bool variant_for_build_id(u64 build_id, fw::Variant* out) {
     if (build_id == kBuildIdBuggy) {
         *out = fw::kBuggy;
+        return true;
+    }
+    if (build_id == kBuildIdUnguarded) {
+        *out = fw::kUnguarded;
         return true;
     }
     if (build_id == kBuildIdFixed) {
@@ -162,8 +170,9 @@ ReplayResult replay_run_as(const std::vector<u8>& trace, fw::Variant variant,
         result.error = hal.error();
         return result;
     }
-    result.loaded       = true;
-    result.events_total = hal.event_count();
+    result.loaded         = true;
+    result.events_total   = hal.event_count();
+    result.sites_recorded = hal.sites_recorded();
 
     rwd::hal_reset();
     fw::rx_pump_reset();
@@ -182,6 +191,53 @@ ReplayResult replay_run_as(const std::vector<u8>& trace, fw::Variant variant,
     // holds into `hal`.
     rwd::hal_reset();
     return result;
+}
+
+namespace {
+
+struct LocateCtx {
+    fw::Variant variant;
+    u32         main_iters;
+};
+
+// One replay of the example firmware, for the search.
+void run_example(void* ctx, ReplayHal* hal) {
+    const LocateCtx* c = static_cast<const LocateCtx*>(ctx);
+    rwd::hal_reset();
+    fw::rx_pump_reset();
+    fw::rx_pump_install();
+    rwd::hal_attach(hal->ops());
+    rwd::hal_mode_replay();
+    fw::rx_pump_run(c->variant, c->main_iters);
+    rwd::hal_reset();
+}
+
+} // namespace
+
+LocateReport locate_run(const std::vector<u8>& trace, u32 main_iters) {
+    LocateReport report;
+
+    ReplayHal probe;
+    if (!probe.load(trace.data(), trace.size())) {
+        report.error = probe.error();
+        return report;
+    }
+    fw::Variant variant;
+    if (!variant_for_build_id(probe.header().build_id, &variant)) {
+        report.error = "trace was recorded by an unknown firmware build";
+        return report;
+    }
+    report.loaded       = true;
+    report.events_total = probe.event_count();
+
+    LocateCtx ctx;
+    ctx.variant    = variant;
+    ctx.main_iters = main_iters;
+    report.located = locate_landings(trace, &run_example, &ctx);
+    // The search's last run is the located replay, so the firmware state is
+    // its outcome.
+    report.fw = snapshot();
+    return report;
 }
 
 ReplayResult replay_run(const std::vector<u8>& trace, u32 main_iters) {

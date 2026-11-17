@@ -14,6 +14,15 @@
 //
 // kFixed does the read and the decrement inside a critical section.
 //
+// kUnguarded is the fix that is not one: it subtracts what it handled, as it
+// should, but without the critical section. The load, the subtraction and the
+// store of `pending` are plain computation with no peripheral access in
+// between, so the interrupt can land inside them and have its increment
+// overwritten -- and the execution model cannot see that, because it only
+// delivers interrupts where the shim runs. A probe point (RWD_SITE) in the
+// window gives it somewhere to land; without one this variant looks correct
+// on every seed.
+//
 // The state below is file-global on purpose: an interrupt vector is a
 // function of no arguments, so firmware shares data with its ISRs through
 // static storage. That is also precisely what makes the bug possible, and
@@ -27,9 +36,13 @@
 namespace fw {
 
 enum Variant {
-    kBuggy = 0,
-    kFixed = 1
+    kBuggy     = 0,
+    kFixed     = 1,
+    kUnguarded = 2
 };
+
+// The probe point inside kUnguarded's load-subtract-store of `pending`.
+const rwd::u32 kSitePendingRmw = 1;
 
 const rwd::u32 kRingSize = 16;
 

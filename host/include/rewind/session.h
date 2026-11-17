@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "fw/rx_pump.h"
+#include "rewind/locate.h"
 #include "rewind/replay.h"
 
 namespace rwhost {
@@ -26,6 +27,7 @@ namespace rwhost {
 // refuses a mismatch.
 const u64 kBuildIdBuggy = 0xBADC0DE000000001ULL;
 const u64 kBuildIdFixed = 0x600DC0DE00000001ULL;
+const u64 kBuildIdUnguarded = 0x5EC0DE0000000001ULL;
 
 struct RunConfig {
     u64          seed       = 1;
@@ -71,6 +73,10 @@ struct ReplayResult {
 
     bool        diverged = false;
     std::string divergence;
+
+    // False when the trace was recorded without its probe points, which is
+    // when a divergence may only mean the interrupt was put in the wrong place.
+    bool        sites_recorded = true;
 
     std::size_t events_consumed = 0;
     std::size_t events_total    = 0;
@@ -120,6 +126,18 @@ RecordResult record_run(const RunConfig& cfg);
 // the binary is pinned by build_id. It is a parameter here only so the tests
 // can show what happens when the two disagree.
 ReplayResult replay_run(const std::vector<u8>& trace, u32 main_iters);
+
+// Searches for where each interrupt landed in a trace recorded without its
+// probe points (see locate.h), against the firmware build the header names.
+// `fw` is the firmware's state after the located replay.
+struct LocateReport {
+    bool                loaded = false;
+    std::string         error;
+    rwhost::LocateResult located;
+    FirmwareOutcome     fw;
+    std::size_t         events_total = 0;
+};
+LocateReport locate_run(const std::vector<u8>& trace, u32 main_iters);
 
 // Replays against a caller-chosen variant, skipping the build_id check.
 // Exists to demonstrate what replaying the wrong binary looks like.

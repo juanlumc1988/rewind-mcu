@@ -9,6 +9,7 @@
 #define REWIND_REPLAY_H
 
 #include <cstddef>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,12 @@ public:
     const std::string& divergence() const { return divergence_; }
     bool diverged() const { return !divergence_.empty(); }
 
+    // The cursor at the moment of the first divergence. After it the firmware
+    // keeps running against a trace it has left, and can by luck fall back
+    // into step, so cursor() at the end of a run says little about how far a
+    // replay really got; this does.
+    std::size_t divergence_cursor() const { return divergence_cursor_; }
+
     // Called at the moment a chosen event is about to be served. The
     // Timeline uses it to snapshot firmware state at an exact point.
     typedef void (*CaptureFn)(void* ctx);
@@ -63,6 +70,23 @@ public:
     void set_capture_point(std::size_t index, CaptureFn fn, void* ctx);
     void clear_capture_point();
     bool captured() const { return captured_; }
+
+    // True unless the trace was recorded with kFlagNoSites. Then a probe point
+    // in the firmware is a crossing the trace has an event for; otherwise it
+    // is only a candidate place to deliver an interrupt (see set_landing).
+    bool sites_recorded() const { return sites_recorded_; }
+
+    // Where to deliver the interrupt that sits at trace event `event`: after
+    // `probes` probe points have gone by since the last crossing. 0, the
+    // default, is right after the crossing itself, which is where replay puts
+    // every interrupt when it is not told otherwise. Only meaningful when the
+    // trace was recorded without its sites.
+    void set_landing(std::size_t event, u32 probes);
+    void clear_landings();
+
+    // Starts the run over from the top: cursor, clock, divergence, and the
+    // probe count. Landings are kept; the event counter is not reset.
+    void restart();
 
     // Repositions the cursor, for resuming from a checkpoint. Clears any
     // latched divergence, since a restored run has not diverged yet.
@@ -99,6 +123,10 @@ private:
     std::vector<rwd::Event> events_;
     std::size_t                cursor_;
     u64                        now_;
+    std::size_t                divergence_cursor_;
+    bool                       sites_recorded_;
+    u32                        probe_count_;   // sites since the last crossing
+    std::map<std::size_t, u32> landings_;
     std::size_t                capture_at_;
     CaptureFn                  capture_fn_;
     void*                      capture_ctx_;

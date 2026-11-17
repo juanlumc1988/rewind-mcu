@@ -176,7 +176,7 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
 | `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `tests/`    | 118 cases, 5.2 million assertions              | C++17 |
+| `tests/`    | 146 cases, 5.3 million assertions              | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -277,8 +277,45 @@ crossing is recorded, replay checks it in order, and an interrupt recorded after
 it is delivered there. A load-add-store with a probe point in it loses an update
 on some simulator seeds and not others, and the seeds that lose one replay
 from the trace alone and lose the same one (`tests/test_sites.cpp`). The
-example firmware does not use them yet, and a window with no probe point in it
-is still out of reach. See
+example firmware's `unguarded` variant uses one: it subtracts what it handled
+without a critical section, a race with no register access in its window, and
+`rewind hunt --variant unguarded` finds it (85 of 1000 seeds, against 419 for
+`buggy` and none for `fixed`). A window with no probe point in it is still out
+of reach, and `rewind landings FILE` says where that happened on a trace from a
+part: for each interrupt, how many cycles after the last crossing it was taken,
+and the return address to look the code up by.
+
+A part will not record its probe points: they cost trace bytes and cycles, so
+they are compiled out on the device, and the trace says only that an interrupt
+came between two accesses. The host build keeps them, and they become
+candidate places to deliver it. `rewind locate` tries each and keeps the one
+the rest of the trace agrees with; `--no-sites` records a simulator run that
+way, to try it:
+
+```console
+$ rewind hunt --variant unguarded --no-sites --save hw.rwd
+85 of 1000 runs failed (8.5%)
+
+$ rewind replay hw.rwd
+DIVERGED: event 2253: firmware wrote 0x40002000, trace has MMIO_READ
+This trace was recorded without its probe points, so an interrupt that landed
+away from an MMIO access is replayed in the wrong place. `rewind locate`
+searches for where.
+
+$ rewind locate hw.rwd
+24 interrupts to place in 6096 events; 51 replays of the firmware
+...
+   2244        6694    1  right after the crossing     1
+   2249        6707    1  after 1 probe point          2
+   2517        7508    1  right after the crossing     1
+...
+replay with these landings: reproduces the recording
+consumed 23 bytes  checksum 0x4383D282  state hash 0x8B5B387DDA1B83D7
+```
+
+It recovers the one interrupt that landed in the window and reproduces the run
+the simulator recorded, to the checksum. It can only choose among the probe
+points the build has, and cannot tell apart landings the trace never shows; see
 [`docs/design/execution-model.md`](docs/design/execution-model.md).
 
 The header carries a `build_id`. Replaying a trace against a different
@@ -315,7 +352,7 @@ Built for a Cortex-M4 at `-Os`, measured in CI on every push:
 
 | Object | text (flash) | bss |
 |---|---:|---:|
-| `trace_writer.cpp` | 1114 | 0 |
+| `trace_writer.cpp` | 1124 | 0 |
 | `hal.cpp` | 825 | 50 |
 | `ring_buffer.cpp` | 334 | 0 |
 | `recorder.cpp` | 278 | 0 |
@@ -323,7 +360,7 @@ Built for a Cortex-M4 at `-Os`, measured in CI on every push:
 | `crc32.cpp` | 140 | 0 |
 | `cortex_m.cpp` | 170 | 0 |
 | `clock.cpp` | 98 | 0 |
-| **recording total** | **3125** | **50** |
+| **recording total** | **3135** | **50** |
 | `trace_reader.cpp` | 1712 | 0 |
 
 **Roughly 3.1 KB of flash and 50 bytes of .bss to record.** The reader is
@@ -404,11 +441,14 @@ Stated plainly, because the gap between this and the pitch is real:
   rather than replayed wrongly. The first half of the fix is done: a vector
   entry declared with `RWD_CORTEX_M_ISR` records the return address from the
   exception frame (`EV_IRQ_AT`), and the trampoline has been run on an
-  emulated Cortex-M4 (`tests/qemu`), though not on a part. The address belongs to the
-  device build, so replay cannot stop on it; what it can stop on are probe
-  points (`RWD_SITE`), which the simulator and replay honour. What is missing
-  is using them: the example firmware has none, and on a part nothing yet
-  checks that they are dense enough to cover the race. See [`docs/design/execution-model.md`](docs/design/execution-model.md).
+  emulated Cortex-M4 (`tests/qemu`), though not on a part. The address belongs
+  to the device build, so replay cannot stop on it; what it can stop on are
+  probe points (`RWD_SITE`), which the simulator and replay honour and the
+  example firmware's `unguarded` variant uses. `rewind landings` reports the
+  interrupts that landed too far from any crossing, and `rewind locate`
+  searches for where they landed in a trace recorded without probe points.
+  None of it has been tried on a part. See
+  [`docs/design/execution-model.md`](docs/design/execution-model.md).
 - **Reverse execution stops at iteration boundaries for checkpoints.** Seeks
   land on an exact event, but a checkpoint can only be taken where no call is
   in progress. Fine here; a firmware with a deeply nested main loop would
@@ -424,10 +464,11 @@ Stated plainly, because the gap between this and the pitch is real:
 ## Roadmap
 
 1. Re-enter a handler where hardware actually did. The return address is
-   recorded and probe points give replay places to stop; what is left is
-   using them on the example firmware and checking, from the recorded
-   address, that they were dense enough. This is what makes hardware traces
-   replay.
+   recorded, probe points give replay places to stop, `rewind landings`
+   reports where they were not dense enough, and `rewind locate` searches
+   for the landing when the trace does not say. What is left is trying it on
+   a part, and resuming the search from checkpoints for long recordings.
+   This is what makes hardware traces replay.
 2. Run it on a part: a UART or RTT transport, and a measured overhead number
    held in CI.
 3. DMA events.
