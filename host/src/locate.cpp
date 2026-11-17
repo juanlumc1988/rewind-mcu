@@ -97,9 +97,6 @@ private:
     std::size_t              best_depth_;
     std::vector<u32>         tried_;
     std::vector<char>        truncated_;
-
-    friend LocateResult locate_landings(const std::vector<u8>&, RunFirmwareFn,
-                                        void*, const LocateOptions&);
 };
 
 // Chooses a placement for interrupt n, given those before it. True once the
