@@ -10,8 +10,10 @@
 
 #include "doctest.h"
 
+#include <string>
 #include <vector>
 
+#include "rewind/landings.h"
 #include "rewind/session.h"
 #include "rewind/trace_reader.h"
 
@@ -151,4 +153,142 @@ TEST_CASE("build ids name all three variants") {
     }
     CHECK(rwhost::build_id_for(fw::kBuggy) != rwhost::build_id_for(fw::kUnguarded));
     CHECK(rwhost::build_id_for(fw::kFixed) != rwhost::build_id_for(fw::kUnguarded));
+}
+
+// -- locating the landing in a trace that does not say (kFlagNoSites) --
+
+namespace {
+
+rwhost::RunConfig bare_config(u64 seed, fw::Variant variant) {
+    rwhost::RunConfig cfg = config(seed, variant);
+    cfg.flags = (rwd::u16)(cfg.flags | rwd::kFlagNoSites);
+    return cfg;
+}
+
+} // namespace
+
+TEST_CASE("recording the example firmware without its sites changes nothing but the trace") {
+    for (u32 seed = 1; seed <= 30; ++seed) {
+        CAPTURE(seed);
+        const rwhost::RecordResult full = rwhost::record_run(config(seed, fw::kUnguarded));
+        const rwhost::RecordResult bare = rwhost::record_run(bare_config(seed, fw::kUnguarded));
+
+        CHECK(bare.fw.state_hash == full.fw.state_hash);
+        CHECK(bare.fw.consumed   == full.fw.consumed);
+        CHECK(bare.cycles        == full.cycles);
+        CHECK(count_type(decode(bare.trace), rwd::EV_SITE) == 0u);
+        CHECK(count_type(decode(full.trace), rwd::EV_SITE) > 0u);
+    }
+}
+
+TEST_CASE("locate reproduces an unguarded failure from a trace without sites") {
+    u32 failing = 0;
+    u32 naive_wrong = 0;
+
+    for (u32 seed = 1; seed <= kSeeds; ++seed) {
+        CAPTURE(seed);
+        const rwhost::RunConfig    cfg  = bare_config(seed, fw::kUnguarded);
+        const rwhost::RecordResult bare = rwhost::record_run(cfg);
+        if (!bare.bug_triggered()) {
+            continue;
+        }
+        ++failing;
+
+        // What replay alone does with it: usually wrong, and it says so.
+        const rwhost::ReplayResult naive = rwhost::replay_run(bare.trace, cfg.main_iters);
+        REQUIRE(naive.loaded);
+        CHECK_FALSE(naive.sites_recorded);
+        if (naive.diverged) {
+            ++naive_wrong;
+        }
+
+        const rwhost::LocateReport rep = rwhost::locate_run(bare.trace, cfg.main_iters);
+        REQUIRE(rep.loaded);
+        REQUIRE(rep.located.applicable);
+        CHECK_FALSE(rep.located.final_diverged);
+        CHECK(rep.located.unresolved() == 0u);
+        CHECK_FALSE(rep.located.gave_up);
+
+        // Reproduces the recording, observable for observable.
+        CHECK(rep.fw.state_hash == bare.fw.state_hash);
+        CHECK(rep.fw.consumed   == bare.fw.consumed);
+        CHECK(rep.fw.checksum   == bare.fw.checksum);
+
+        // And exactly one placement is not "right after the crossing": the
+        // interrupt that landed in the window.
+        u32 elsewhere = 0;
+        for (std::size_t i = 0; i < rep.located.choices.size(); ++i) {
+            if (rep.located.choices[i].probes != 0u) {
+                ++elsewhere;
+            }
+        }
+        CHECK(elsewhere >= 1u);
+    }
+    CHECK(failing > 0u);
+    CHECK(naive_wrong > 0u);   // the problem locate solves is real
+}
+
+TEST_CASE("locate agrees with the clock about which interrupts landed away from a crossing") {
+    // Two independent routes to the same answer: the slack in the trace says
+    // which interrupts were taken away from an MMIO access, and the search
+    // says which needed a placement other than "right after the crossing".
+    u32 compared = 0;
+    for (u32 seed = 1; seed <= kSeeds; ++seed) {
+        CAPTURE(seed);
+        const rwhost::RunConfig    cfg  = bare_config(seed, fw::kUnguarded);
+        const rwhost::RecordResult bare = rwhost::record_run(cfg);
+        if (!bare.bug_triggered()) {
+            continue;
+        }
+
+        std::vector<rwhost::Landing> slack = rwhost::find_landings(decode(bare.trace));
+        const rwhost::LocateReport   rep   = rwhost::locate_run(bare.trace, cfg.main_iters);
+        REQUIRE(rep.located.applicable);
+        REQUIRE(rep.located.choices.size() == slack.size());
+
+        for (std::size_t i = 0; i < slack.size(); ++i) {
+            CAPTURE(i);
+            if (rep.located.choices[i].probes != 0u) {
+                // Placed past a probe point, so it was taken after the crossing.
+                CHECK(slack[i].slack > 0u);
+            }
+        }
+        ++compared;
+    }
+    CHECK(compared > 0u);
+}
+
+TEST_CASE("locate has nothing to do on the variants that cross no probe point") {
+    const fw::Variant variants[2] = { fw::kBuggy, fw::kFixed };
+    for (int v = 0; v < 2; ++v) {
+        for (u32 seed = 1; seed <= 10; ++seed) {
+            CAPTURE(seed);
+            const rwhost::RunConfig    cfg  = bare_config(seed, variants[v]);
+            const rwhost::RecordResult bare = rwhost::record_run(cfg);
+
+            const rwhost::LocateReport rep = rwhost::locate_run(bare.trace, cfg.main_iters);
+            REQUIRE(rep.located.applicable);
+            CHECK_FALSE(rep.located.final_diverged);
+            CHECK(rep.located.unresolved() == 0u);
+            for (std::size_t i = 0; i < rep.located.choices.size(); ++i) {
+                CHECK(rep.located.choices[i].probes == 0u);
+                CHECK_FALSE(rep.located.choices[i].ambiguous);
+            }
+            CHECK(rep.fw.state_hash == bare.fw.state_hash);
+        }
+    }
+}
+
+TEST_CASE("locate refuses a trace that kept its sites, and one it cannot read") {
+    const rwhost::RunConfig    cfg  = config(5, fw::kUnguarded);
+    const rwhost::RecordResult full = rwhost::record_run(cfg);
+    const rwhost::LocateReport kept = rwhost::locate_run(full.trace, cfg.main_iters);
+    REQUIRE(kept.loaded);
+    CHECK_FALSE(kept.located.applicable);
+    CHECK(kept.located.why.find("recorded its probe points") != std::string::npos);
+
+    const std::vector<rwd::u8> junk(64, 0x55);
+    const rwhost::LocateReport bad = rwhost::locate_run(junk, cfg.main_iters);
+    CHECK_FALSE(bad.loaded);
+    CHECK_FALSE(bad.error.empty());
 }

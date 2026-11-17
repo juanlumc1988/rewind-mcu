@@ -204,6 +204,9 @@ bool TraceWriter::irq_enter_at(u64 ts, u32 vector, u32 return_pc) {
 }
 
 bool TraceWriter::site(u64 ts, u32 site) {
+    if ((flags_ & kFlagNoSites) != 0) {
+        return ok_;   // the recorder was asked not to keep them
+    }
     return write_plain((u8)EV_SITE, ts, &site, 0);
 }
 

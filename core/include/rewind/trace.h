@@ -104,7 +104,16 @@ enum TraceFlags {
     // so recording them is redundant. We record them anyway by default
     // because during replay they are exactly what proves the replay did not
     // silently diverge. Clear this flag to halve a trace on a tight link.
-    kFlagRecordWrites = 0x0001
+    kFlagRecordWrites = 0x0001,
+
+    // The recorder did not record its probe points (RWD_SITE): they were
+    // compiled out on the device, or it is a part where nothing else could
+    // say where an interrupt landed. The trace then holds no EV_SITE, and in
+    // replay a site is not a crossing to be matched against the trace but a
+    // candidate place to deliver an interrupt whose landing the trace does not
+    // say. Replay alone puts it right after the last crossing; locating where
+    // it really landed is a search (rewind locate).
+    kFlagNoSites = 0x0002
 };
 
 // 1 type byte + 3 varints at worst.

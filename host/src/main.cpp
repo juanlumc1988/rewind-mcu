@@ -37,6 +37,7 @@ int usage() {
         "  rewind inspect FILE [--at N] [--walk M] [--stride K]\n"
         "                      [--find-consumed N] [--iters N]\n"
         "  rewind landings FILE [--threshold N] [--limit N]\n"
+        "  rewind locate FILE [--iters N]\n"
         "\n"
         "common options:\n"
         "  --seed N      simulator seed; picks the interrupt arrival schedule\n"
@@ -50,6 +51,13 @@ int usage() {
         "                recording when replaying.\n"
         "  --no-writes   omit MMIO writes from the trace: smaller, but replay\n"
         "                loses its consistency check\n"
+        "  --no-sites    do not record probe points. The simulator still takes\n"
+        "                interrupts at them, but the trace no longer says where:\n"
+        "                the shape of a trace from a part. See `locate`.\n"
+        "\n"
+        "locate -- find where interrupts landed in a trace recorded with\n"
+        "--no-sites, by replaying the firmware with each candidate placement\n"
+        "and keeping the one the rest of the trace agrees with.\n"
         "\n"
         "landings -- where each interrupt landed, from the clock in the trace:\n"
         "  --threshold N     report interrupts taken more than N cycles after\n"
@@ -164,6 +172,7 @@ struct Args {
     bool        has_find = false;
     u32         ckpt     = 128;
     bool        writes   = true;
+    bool        sites    = true;
     fw::Variant variant  = fw::kBuggy;
     std::string out;
     std::string save;
@@ -179,6 +188,8 @@ Args parse(int argc, char** argv, int first) {
 
         if (opt == "--no-writes") {
             a.writes = false;
+        } else if (opt == "--no-sites") {
+            a.sites = false;
         } else if (opt == "--from" && has_value) {
             a.from = std::strtoull(argv[++i], 0, 10);
         } else if (opt == "--to" && has_value) {
@@ -243,7 +254,8 @@ rwhost::RunConfig to_config(const Args& a) {
     cfg.tx_total   = a.tx;
     cfg.main_iters = a.iters;
     cfg.variant    = a.variant;
-    cfg.flags      = a.writes ? rwd::kFlagRecordWrites : 0;
+    cfg.flags      = (a.writes ? rwd::kFlagRecordWrites : 0)
+                   | (a.sites ? 0 : rwd::kFlagNoSites);
     return cfg;
 }
 
@@ -411,6 +423,12 @@ int cmd_replay(const Args& a) {
                      "the firmware asked for something this trace does not\n"
                      "have. Either it is not the build that recorded it, or\n"
                      "--iters does not match the recording.\n");
+        if (!rep.sites_recorded) {
+            std::fprintf(stderr,
+                         "\nThis trace was recorded without its probe points, so an\n"
+                         "interrupt that landed away from an MMIO access is replayed\n"
+                         "in the wrong place. `rewind locate` searches for where.\n");
+        }
         return 1;
     }
     return 0;
@@ -568,6 +586,80 @@ int cmd_dump(const Args& a) {
 
 } // namespace
 
+// Searches for where each interrupt landed in a trace recorded without its
+// probe points.
+int cmd_locate(const Args& a) {
+    if (a.file.empty()) {
+        std::fprintf(stderr, "rewind: locate needs a trace file\n");
+        return 2;
+    }
+    std::vector<rwd::u8> trace;
+    if (!read_file(a.file.c_str(), &trace)) {
+        return 1;
+    }
+
+    const rwhost::LocateReport rep = rwhost::locate_run(trace, a.iters);
+    if (!rep.loaded) {
+        std::fprintf(stderr, "rewind: %s\n", rep.error.c_str());
+        return 1;
+    }
+    const rwhost::LocateResult& r = rep.located;
+    if (!r.applicable) {
+        std::printf("%s\n", r.why.c_str());
+        return 0;
+    }
+
+    std::printf("%zu interrupts to place in %zu events; %u replays of the firmware%s\n\n",
+                r.choices.size(), rep.events_total, r.runs,
+                r.gave_up ? " (stopped at the limit)" : "");
+    if (!r.choices.empty()) {
+        std::printf("%7s %11s %4s  %-24s %5s  %s\n", "event", "cycle", "vec",
+                    "delivered", "tried", "");
+    }
+    for (std::size_t i = 0; i < r.choices.size(); ++i) {
+        const rwhost::LandingChoice& c = r.choices[i];
+        char where[48];
+        if (!c.resolved) {
+            std::snprintf(where, sizeof(where), "(not found)");
+        } else if (c.probes == 0) {
+            std::snprintf(where, sizeof(where), "right after the crossing");
+        } else {
+            std::snprintf(where, sizeof(where), "after %u probe point%s", c.probes,
+                          c.probes == 1 ? "" : "s");
+        }
+        const char* note = "";
+        if (!c.resolved) {
+            note = "no placement fits";
+        } else if (c.ambiguous) {
+            note = "ambiguous: more than one reproduces the trace; kept the earliest";
+        } else if (c.truncated) {
+            note = "stopped at the candidate limit";
+        }
+        std::printf("%7zu %11llu %4u  %-24s %5u  %s\n", c.event,
+                    (unsigned long long)c.ts, c.vector, where, c.candidates, note);
+    }
+
+    std::printf("\nreplay with these landings: ");
+    if (r.final_diverged) {
+        std::printf("still DIVERGES at event %zu\n  %s\n", r.final_cursor,
+                    r.final_divergence.c_str());
+        std::printf("\nNo placement of every interrupt reproduces this trace with the\n"
+                    "probe points this build has. An interrupt landed somewhere none\n"
+                    "of them covers: put an RWD_SITE where it could have.\n");
+        return 1;
+    }
+    std::printf("reproduces the recording\n");
+    std::printf("consumed %u bytes  checksum 0x%08X  state hash 0x%016llX\n",
+                rep.fw.consumed, rep.fw.checksum,
+                (unsigned long long)rep.fw.state_hash);
+    if (r.ambiguous() != 0) {
+        std::printf("\n%zu interrupt%s ambiguous: the trace cannot tell those placements\n"
+                    "apart, so none of what it recorded depends on which it was.\n",
+                    r.ambiguous(), r.ambiguous() == 1 ? " is" : "s are");
+    }
+    return 0;
+}
+
 // Where each interrupt landed, relative to where replay can deliver it.
 int cmd_landings(const Args& a) {
     if (a.file.empty()) {
@@ -661,7 +753,9 @@ int cmd_landings(const Args& a) {
                 "cycles touches state the handler shares. If it does, replay will not\n"
                 "reproduce the run and will usually say so (a checked write or read\n"
                 "comes out different). Put an RWD_SITE in that code; where it is, the\n"
-                "return address says: arm-none-eabi-addr2line -e <firmware.elf> <address>.\n");
+                "return address says: arm-none-eabi-addr2line -e <firmware.elf> <address>.\n"
+                "If the trace was recorded without its probe points, `rewind locate`\n"
+                "searches for the landing among the ones this build has.\n");
     return 0;
 }
 
@@ -688,6 +782,7 @@ int main(int argc, char** argv) {
     if (command == "sizing") return cmd_sizing(args);
     if (command == "inspect") return cmd_inspect(args);
     if (command == "landings") return cmd_landings(args);
+    if (command == "locate") return cmd_locate(args);
 
     std::fprintf(stderr, "rewind: unknown command '%s'\n", command.c_str());
     return usage();
