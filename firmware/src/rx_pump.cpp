@@ -62,6 +62,47 @@ u64 fnv_u32(u64 h, u32 v) {
 
 } // namespace
 
+namespace {
+
+// The DMA receiver. The count register says how many bytes have been
+// deposited in total; the ring is read through the shim, in at most two pieces
+// when the unread bytes wrap its end.
+void rx_dma_run(u32 main_iters) {
+    for (u32 iter = 0; iter < main_iters; ++iter) {
+        const u32 count = rwd::mmio_read32(sim::kDma0Count);
+        u32       avail = count - g_state.dma_tail;
+
+        if (avail == 0) {
+            rwd::mmio_read32(sim::kSystickCnt);    // idle poll
+            continue;
+        }
+        if (avail > sim::kDmaRingSize) {
+            // Lapped: the DMA wrote over bytes this loop never got to.
+            g_state.dma_lost += avail - sim::kDmaRingSize;
+            g_state.dma_tail  = count - sim::kDmaRingSize;
+            avail             = sim::kDmaRingSize;
+        }
+
+        u8        buf[sim::kDmaRingSize];
+        const u32 index = g_state.dma_tail % sim::kDmaRingSize;
+        const u32 first = (avail < sim::kDmaRingSize - index) ? avail
+                                                              : sim::kDmaRingSize - index;
+        rwd::hal_dma_read(sim::kDmaRegion, index, buf, first);
+        if (avail > first) {
+            rwd::hal_dma_read(sim::kDmaRegion, 0, buf + first, avail - first);
+        }
+
+        for (u32 i = 0; i < avail; ++i) {
+            g_state.checksum = g_state.checksum * 31u + (u32)buf[i];
+            ++g_state.consumed;
+            rwd::mmio_write32(sim::kGpio0Odr, g_state.consumed);
+        }
+        g_state.dma_tail += avail;
+    }
+}
+
+} // namespace
+
 void rx_pump_reset() {
     for (u32 i = 0; i < kRingSize; ++i) {
         g_state.ring[i] = 0;
@@ -73,6 +114,8 @@ void rx_pump_reset() {
     g_state.checksum   = 0;
     g_state.last_stamp = 0;
     g_state.overflows  = 0;
+    g_state.dma_tail   = 0;
+    g_state.dma_lost   = 0;
 }
 
 void rx_pump_install() {
@@ -80,6 +123,10 @@ void rx_pump_install() {
 }
 
 void rx_pump_run(Variant variant, u32 main_iters) {
+    if (variant == kDma) {
+        rx_dma_run(main_iters);
+        return;
+    }
     for (u32 iter = 0; iter < main_iters; ++iter) {
         u32 n;
 
@@ -140,6 +187,12 @@ u64 rx_pump_state_hash() {
     h = fnv_u32(h, g_state.checksum);
     h = fnv_u32(h, g_state.last_stamp);
     h = fnv_u32(h, g_state.overflows);
+    // The DMA fields only count when a run used them, so that the hash of a run
+    // that did not -- every one before the DMA receiver existed -- is unchanged.
+    if (g_state.dma_tail != 0 || g_state.dma_lost != 0) {
+        h = fnv_u32(h, g_state.dma_tail);
+        h = fnv_u32(h, g_state.dma_lost);
+    }
     return h;
 }
 

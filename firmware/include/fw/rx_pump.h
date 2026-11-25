@@ -23,6 +23,13 @@
 // window gives it somewhere to land; without one this variant looks correct
 // on every seed.
 //
+// kDma is a different receiver altogether: the UART feeds a ring in RAM through
+// DMA, there is no interrupt, and the main loop reads how many bytes have
+// landed from a register and the bytes themselves through hal_dma_read(). It
+// cannot be interrupted at a bad moment, but it can be lapped: if the loop is
+// too slow the DMA overwrites bytes it has not read, and the firmware counts
+// them as lost.
+//
 // The state below is file-global on purpose: an interrupt vector is a
 // function of no arguments, so firmware shares data with its ISRs through
 // static storage. That is also precisely what makes the bug possible, and
@@ -38,7 +45,8 @@ namespace fw {
 enum Variant {
     kBuggy     = 0,
     kFixed     = 1,
-    kUnguarded = 2
+    kUnguarded = 2,
+    kDma       = 3
 };
 
 // The probe point inside kUnguarded's load-subtract-store of `pending`.
@@ -56,6 +64,8 @@ struct State {
                             // simulator's tx_checksum
     rwd::u32 last_stamp;    // cycle count when the last byte was handled
     rwd::u32 overflows;
+    rwd::u32 dma_tail;      // kDma: bytes consumed so far, in total
+    rwd::u32 dma_lost;      // kDma: bytes the DMA overwrote before they were read
 };
 
 void rx_pump_reset();

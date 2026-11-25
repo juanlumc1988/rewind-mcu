@@ -176,7 +176,7 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
 | `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `tests/`    | 146 cases, 5.3 million assertions              | C++17 |
+| `tests/`    | 166 cases, 5.4 million assertions              | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -268,6 +268,10 @@ over, so the delta is usually zero and costs one. That single change took the
 example trace from 9.2 bytes per event to **5.3** — on a device shipping
 traces over a 115200 baud UART, the difference between viable and not.
 
+The header carries a `build_id`. Replaying a trace against a different
+firmware build is the fastest way to spend an afternoon chasing a bug that is
+not there, so it is refused.
+
 ### Probe points
 
 An interrupt can only be replayed where the shim runs, which is at a peripheral
@@ -318,9 +322,43 @@ the simulator recorded, to the checksum. It can only choose among the probe
 points the build has, and cannot tell apart landings the trace never shows; see
 [`docs/design/execution-model.md`](docs/design/execution-model.md).
 
-The header carries a `build_id`. Replaying a trace against a different
-firmware build is the fastest way to spend an afternoon chasing a bug that is
-not there, so it is refused.
+### DMA
+
+A DMA controller writes RAM with no CPU involved, at times nothing on a part can
+observe, so a trace cannot record the deposit. It can record the moment the
+firmware looks. Firmware reads DMA buffers through the shim, the way it reads
+registers, instead of dereferencing them:
+
+```cpp
+const u32 count = mmio_read32(DMA_COUNT);      // how many bytes have landed
+hal_dma_read(RX_REGION, index, buf, n);        // and the bytes themselves
+```
+
+Each read is recorded with the bytes it saw (`EV_DMA`, in pieces of at most 16),
+replay hands the same bytes back whatever memory holds now, and a read of another
+region, offset or length is a divergence like any other. The firmware's look is
+itself a crossing, so unlike an interrupt there is nothing to locate. A buffer is
+named by id, registered by the firmware on the device
+(`HardwareHal::add_dma_region`) and on the host, because a device address means
+nothing on the host.
+
+```console
+$ rewind record --seed 5 --variant dma --out dma.rwd
+uart delivered 24 bytes, firmware consumed 24
+$ rewind dump dma.rwd | grep dma
+       893  dma    region 0 +0    len 1   0D
+      1039  dma    region 0 +1    len 1   20
+      1197  dma    region 0 +2    len 1   76
+```
+
+The example firmware's `dma` variant receives the UART through a ring this way
+and replays exactly. Its trace is larger than the others (about twice the
+events) because it polls the count register every pass. The firmware has to
+read DMA memory through `hal_dma_read`: a direct read of the buffer is not
+recorded, and in replay it sees whatever the host buffer holds, which nothing
+detects. That is the same discipline the model asks of registers, and it is
+the price of not being able to see a DMA deposit. DMA that only *reads* RAM (a
+transmit buffer) is output, not input, and needs nothing.
 
 ## On the device
 
@@ -352,18 +390,22 @@ Built for a Cortex-M4 at `-Os`, measured in CI on every push:
 
 | Object | text (flash) | bss |
 |---|---:|---:|
-| `trace_writer.cpp` | 1124 | 0 |
-| `hal.cpp` | 825 | 50 |
+| `trace_writer.cpp` | 1360 | 0 |
+| `hal.cpp` | 977 | 50 |
 | `ring_buffer.cpp` | 334 | 0 |
 | `recorder.cpp` | 278 | 0 |
 | `varint.cpp` | 166 | 0 |
 | `crc32.cpp` | 140 | 0 |
-| `cortex_m.cpp` | 170 | 0 |
+| `cortex_m.cpp` | 330 | 0 |
 | `clock.cpp` | 98 | 0 |
-| **recording total** | **3135** | **50** |
-| `trace_reader.cpp` | 1712 | 0 |
+| **recording total** | **3683** | **50** |
+| `trace_reader.cpp` | 2307 | 0 |
 
-**Roughly 3.1 KB of flash and 50 bytes of .bss to record.** The reader is
+**Roughly 3.7 KB of flash and 50 bytes of .bss to record,** of which 500 bytes is
+DMA support (`TraceWriter::dma`, `hal_dma_read` and the device backend's region
+table). Those are separate functions: a firmware that does no DMA links none of
+them (a link of the QEMU test program, which does none, has no DMA symbol
+in it). The reader is
 only linked in if the device replays its own traces — useful after a
 watchdog reset, and discarded by `--gc-sections` otherwise.
 
@@ -455,9 +497,8 @@ Stated plainly, because the gap between this and the pitch is real:
   want finer granularity, which needs the call stack captured too.
 - **No transport.** `drain()` takes a function pointer and the tests feed it a
   simulated UART. No SWO, RTT or real UART driver ships here.
-- **No DMA.** The event type is designed and not implemented.
 - **No GUI.** Timeline scrubbing and trace diffing are the eventual Qt layer.
-- **CPU overhead is unmeasured.** Flash cost is now measured in CI (3.1 KB to
+- **CPU overhead is unmeasured.** Flash cost is now measured in CI (3.7 KB to
   record), but the <2% runtime target is still a design goal with no number
   behind it. It cannot get one without a part to run on.
 
@@ -471,7 +512,7 @@ Stated plainly, because the gap between this and the pitch is real:
    This is what makes hardware traces replay.
 2. Run it on a part: a UART or RTT transport, and a measured overhead number
    held in CI.
-3. DMA events.
+3. DMA events. Done: see [DMA](#dma).
 4. Qt timeline and two-trace diffing, over the navigation that now exists.
 
 ## Related projects

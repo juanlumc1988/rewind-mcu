@@ -152,6 +152,29 @@ void hal_site(u32 id) {
     pump_irqs();
 }
 
+void hal_dma_read(u32 region, u32 offset, void* dst, u32 len) {
+    u8* out = static_cast<u8*>(dst);
+
+    while (len > 0) {
+        const u32 n = len < kMaxDmaChunk ? len : kMaxDmaChunk;
+
+        if (g_ops == 0 || g_ops->dma_read == 0) {
+            for (u32 i = 0; i < n; ++i) {
+                out[i] = 0;
+            }
+        } else {
+            g_ops->dma_read(g_ops->ctx, region, offset, out, n);
+            if (g_mode == MODE_RECORD && g_writer != 0 && g_ops->now != 0) {
+                g_writer->dma(g_ops->now(g_ops->ctx), region, offset, out, n);
+            }
+            pump_irqs();
+        }
+        out    += n;
+        offset += n;
+        len    -= n;
+    }
+}
+
 u64 hal_now() {
     if (g_ops == 0 || g_ops->now == 0) {
         return 0;

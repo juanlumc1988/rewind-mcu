@@ -28,6 +28,7 @@ namespace rwhost {
 const u64 kBuildIdBuggy = 0xBADC0DE000000001ULL;
 const u64 kBuildIdFixed = 0x600DC0DE00000001ULL;
 const u64 kBuildIdUnguarded = 0x5EC0DE0000000001ULL;
+const u64 kBuildIdDma       = 0xD0A0DE0000000001ULL;
 
 struct RunConfig {
     u64          seed       = 1;

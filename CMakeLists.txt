@@ -129,6 +129,7 @@ if(REWIND_BUILD_TESTS)
         tests/test_unguarded.cpp
         tests/test_landings.cpp
         tests/test_locate.cpp
+        tests/test_dma.cpp
         tests/test_recorder.cpp
         tests/test_timeline.cpp
         tests/test_determinism.cpp)

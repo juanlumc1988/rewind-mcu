@@ -18,7 +18,10 @@ bool enable_cycle_counter() {
     return true;
 }
 
-HardwareHal::HardwareHal() {
+// dma_ is not cleared: entries past dma_count_ are never read. And ops_.dma_read
+// is left null until a region is registered, so a firmware that does no DMA does
+// not pull s_dma_read into flash -- --gc-sections can drop it.
+HardwareHal::HardwareHal() : dma_count_(0) {
     ops_.read32   = &HardwareHal::s_read32;
     ops_.write32  = &HardwareHal::s_write32;
     ops_.now      = &HardwareHal::s_now;
@@ -37,6 +40,44 @@ void HardwareHal::s_write32(void*, u32 addr, u32 value) {
 
 u64 HardwareHal::s_now(void* ctx) {
     return static_cast<HardwareHal*>(ctx)->clock_.extend(raw_read32(kDwtCyccnt));
+}
+
+bool HardwareHal::add_dma_region(u32 id, const volatile u8* base, u32 size) {
+    if (base == 0 || size == 0 || dma_count_ >= kMaxDmaRegions) {
+        return false;
+    }
+    for (u32 i = 0; i < dma_count_; ++i) {
+        if (dma_[i].id == id) {
+            return false;
+        }
+    }
+    dma_[dma_count_].id   = id;
+    dma_[dma_count_].base = base;
+    dma_[dma_count_].size = size;
+    ++dma_count_;
+    ops_.dma_read = &HardwareHal::s_dma_read;
+    return true;
+}
+
+// Byte by byte through a volatile pointer: the memory changes behind the
+// compiler's back, so it must not be cached, merged or reordered. A region the
+// firmware never registered, or a read past its end, gives zeros -- the same
+// thing an unknown register gives -- and the trace records those zeros, so a
+// replay shows the firmware what it saw.
+void HardwareHal::s_dma_read(void* ctx, u32 region, u32 offset, u8* dst, u32 len) {
+    const HardwareHal* self = static_cast<HardwareHal*>(ctx);
+
+    const DmaRegion* r = 0;
+    for (u32 i = 0; i < self->dma_count_; ++i) {
+        if (self->dma_[i].id == region) {
+            r = &self->dma_[i];
+        }
+    }
+    // Written as subtractions so a hostile offset cannot wrap the sum.
+    const bool ok = (r != 0) && offset <= r->size && len <= r->size - offset;
+    for (u32 i = 0; i < len; ++i) {
+        dst[i] = ok ? r->base[offset + i] : (u8)0;
+    }
 }
 
 u32 HardwareHal::s_poll_irq(void*) {

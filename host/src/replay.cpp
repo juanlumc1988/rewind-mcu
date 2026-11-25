@@ -23,6 +23,7 @@ const char* event_name(u8 type) {
         case rwd::EV_IRQ_ENTER:  return "IRQ_ENTER";
         case rwd::EV_IRQ_AT:     return "IRQ_AT";
         case rwd::EV_SITE:       return "SITE";
+        case rwd::EV_DMA:        return "DMA";
         case rwd::EV_STOP:       return "STOP";
         default:                    return "?";
     }
@@ -41,6 +42,7 @@ ReplayHal::ReplayHal()
     ops_.poll_irq = &ReplayHal::s_poll_irq;
     ops_.ctx      = this;
     ops_.site     = &ReplayHal::s_site;
+    ops_.dma_read = &ReplayHal::s_dma_read;
 
     header_.magic    = 0;
     header_.version  = 0;
@@ -293,10 +295,56 @@ void ReplayHal::site(u32 id) {
     probe_count_ = 0;   // a crossing: candidate positions count from here
 }
 
+// What the firmware saw when it looked at a DMA buffer. Served in trace order
+// like an access, and checked like one: the same region, offset and length
+// must be asked for, or this is not the run that was recorded.
+void ReplayHal::dma_read(u32 region, u32 offset, u8* dst, u32 len) {
+    maybe_capture();
+
+    for (u32 i = 0; i < len; ++i) {
+        dst[i] = 0;
+    }
+
+    if (cursor_ >= events_.size()) {
+        diverge("DMA read of region %u past the end of the recording "
+                "(%zu events consumed)", region, cursor_);
+        return;
+    }
+
+    const rwd::Event& ev = events_[cursor_];
+    if (ev.type == rwd::EV_STOP) {
+        diverge("DMA read of region %u past the end of the recording "
+                "(the recorded run stopped after %zu events)", region, cursor_);
+        return;
+    }
+    if (ev.type != rwd::EV_DMA) {
+        diverge("event %zu: firmware read %u bytes of DMA region %u, trace has %s",
+                cursor_, len, region, event_name(ev.type));
+        return;
+    }
+    if (ev.addr != region || ev.value != offset || ev.len != len) {
+        diverge("event %zu: firmware read %u bytes of DMA region %u at %u, "
+                "trace recorded %u bytes of region %u at %u",
+                cursor_, len, region, offset, (unsigned)ev.len, ev.addr, ev.value);
+        return;
+    }
+
+    for (u32 i = 0; i < len; ++i) {
+        dst[i] = ev.data[i];
+    }
+    ++cursor_;
+    ++events_served_;
+    now_         = ev.ts;
+    probe_count_ = 0;
+}
+
 u32  ReplayHal::s_read32(void* ctx, u32 addr) { return static_cast<ReplayHal*>(ctx)->read32(addr); }
 void ReplayHal::s_write32(void* ctx, u32 a, u32 v) { static_cast<ReplayHal*>(ctx)->write32(a, v); }
 u64  ReplayHal::s_now(void* ctx) { return static_cast<ReplayHal*>(ctx)->now_; }
 u32  ReplayHal::s_poll_irq(void* ctx) { return static_cast<ReplayHal*>(ctx)->poll_irq(); }
 void ReplayHal::s_site(void* ctx, u32 id) { static_cast<ReplayHal*>(ctx)->site(id); }
+void ReplayHal::s_dma_read(void* ctx, u32 region, u32 offset, u8* dst, u32 len) {
+    static_cast<ReplayHal*>(ctx)->dma_read(region, offset, dst, len);
+}
 
 } // namespace rwhost

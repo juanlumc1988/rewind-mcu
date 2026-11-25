@@ -53,12 +53,9 @@ bool Timeline::open(const std::vector<u8>& trace, u32 main_iters,
     // One full pass, snapshotting between iterations. Iteration boundaries
     // are the only points where a struct copy is a complete description of
     // the run: no call in progress, interrupt mask balanced.
-    fw::State empty;
-    for (u32 i = 0; i < fw::kRingSize; ++i) {
-        empty.ring[i] = 0;
-    }
-    empty.head = empty.tail = empty.pending = 0;
-    empty.consumed = empty.checksum = empty.last_stamp = empty.overflows = 0;
+    // Value-initialised, so every field starts at zero -- including any added
+    // after this was written, which listing them by hand silently misses.
+    const fw::State empty = fw::State();
 
     install(empty, 0, 0);
     replay_.clear_capture_point();
