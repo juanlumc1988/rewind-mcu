@@ -1,0 +1,226 @@
+# SPDX-License-Identifier: Apache-2.0
+# Part of rewind -- deterministic record & replay for bare-metal firmware.
+#
+# The executables a release carries, built and checked.
+#
+# Reusable: ci.yml calls it on every push and pull request, so that what a
+# release would ship is proved to build and to work all the time, not on the day;
+# release.yml calls it for a tag and then attaches the result to the release.
+#
+#   linux    rewind (one static executable, runs on any x86-64 Linux, WSL2 included)
+#            and rewind-gui (dynamic: it needs Qt 6 on the machine)
+#   windows  rewind.exe, the command line, cross-compiled with MinGW as one static
+#            executable. The viewer is not built for Windows.
+#
+# The Windows build is run, not just compiled: its whole unit suite and a record,
+# replay and byte comparison against the Linux build, under Wine.
+
+name: Binaries
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Tag or commit to build. Empty: the commit that called this."
+        type: string
+        default: ""
+      retention-days:
+        description: "How long the workflow keeps what it builds."
+        type: number
+        default: 90
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: linux x86-64
+    # Pinned, not -latest: the viewer links the Qt of this image, and what a
+    # binary needs to run depends on what it was built on.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install build tools and Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build qt6-base-dev fonts-dejavu-core
+
+      # Two builds, because a static link flag on the viewer would ask Qt for a
+      # static Qt, which is not there.
+      - name: Build the command line, statically
+        run: |
+          cmake -S . -B build-cli -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DREWIND_BUILD_TESTS=OFF -DREWIND_INSTALL=OFF \
+                -DCMAKE_EXE_LINKER_FLAGS=-static
+          cmake --build build-cli -j --target rewind
+
+      - name: Build the viewer
+        run: |
+          cmake -S . -B build-gui -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DREWIND_BUILD_TESTS=OFF -DREWIND_INSTALL=OFF -DREWIND_BUILD_GUI=ON
+          cmake --build build-gui -j --target rewind-gui
+
+      - name: Check them
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          file build-cli/rewind
+          if ldd build-cli/rewind 2>&1 | grep -qv "not a dynamic executable"; then
+            echo "rewind is not a static executable"; exit 1
+          fi
+          ./build-cli/rewind --version
+          ./build-gui/rewind-gui --version
+          # What the command line is for, end to end: a failing run recorded, and
+          # replayed from the file alone to the same failure.
+          ./build-cli/rewind record --seed 2 --variant buggy --out /tmp/bug.rwd || test $? -eq 1
+          ./build-cli/rewind record --seed 2 --variant fixed --out /tmp/clean.rwd
+          ./build-cli/rewind replay /tmp/clean.rwd
+          ./build-cli/rewind diff /tmp/bug.rwd /tmp/clean.rwd > /tmp/diff.txt || test $? -eq 1   # 1: they differ
+          grep -q "the first difference is at event" /tmp/diff.txt
+          # And the viewer draws a window.
+          ./build-gui/rewind-gui /tmp/bug.rwd /tmp/clean.rwd --first-diff \
+                --screenshot /tmp/viewer.png --size 1180x720
+          test "$(stat -c %s /tmp/viewer.png)" -gt 50000
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          version=$(./build-cli/rewind --version | awk '{print $2}')
+          name=rewind-$version-linux-x86_64
+          mkdir -p dist/$name
+          cp build-cli/rewind build-gui/rewind-gui dist/$name/
+          strip dist/$name/rewind dist/$name/rewind-gui
+          cp README.md LICENSE CHANGELOG.md dist/$name/
+          cat > dist/$name/BINARIES.txt <<TXT
+          rewind $version for Linux x86-64.
+
+            rewind      the command line. One static executable: it runs on any x86-64
+                        Linux, and under WSL2, with nothing installed.
+            rewind-gui  the viewer. It needs Qt 6 on the machine and was built on
+                        Ubuntu 24.04; there:  sudo apt install libqt6widgets6
+                        (under WSL2 it opens a window through WSLg).
+
+          Nothing in rewind has run on a real microcontroller yet; the README says what
+          that means. Start with:  ./rewind hunt --from 1 --to 100 --save bug.rwd
+          TXT
+          tar -C dist -czf dist/$name.tar.gz $name
+          (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256 && cat $name.tar.gz.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rewind-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error
+
+  windows:
+    name: windows x86-64 (cross-compiled, run under wine)
+    runs-on: ubuntu-24.04
+    env:
+      WINE: /usr/lib/wine/wine64
+      WINEDEBUG: "-all"
+      # No Mono and no Gecko: a console program needs neither, and wine would
+      # otherwise stop to offer to download them.
+      WINEDLLOVERRIDES: "mscoree,mshtml="
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install build tools and wine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build zip \
+                g++-mingw-w64-x86-64-posix wine64
+
+      - name: Build for Windows, statically
+        run: |
+          cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_SYSTEM_NAME=Windows \
+                -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \
+                -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \
+                -DREWIND_INSTALL=OFF \
+                -DCMAKE_EXE_LINKER_FLAGS=-static
+          cmake --build build-win -j
+
+      # The same build for Linux, only to have something to compare against.
+      - name: Build the command line for Linux
+        run: |
+          cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DREWIND_BUILD_TESTS=OFF -DREWIND_INSTALL=OFF
+          cmake --build build-linux -j --target rewind
+
+      - name: Check that it only needs what every Windows has
+        run: |
+          set -euo pipefail
+          dlls=$(x86_64-w64-mingw32-objdump -p build-win/rewind.exe | awk '/DLL Name/ {print tolower($3)}' | sort -u | tr '\n' ' ')
+          echo "imports: $dlls"
+          for dll in $dlls; do
+            case $dll in kernel32.dll|msvcrt.dll) ;; *) echo "unexpected dependency: $dll"; exit 1 ;; esac
+          done
+
+      # Run, not just built. The whole unit suite, and then the command line.
+      - name: Run the unit tests under wine
+        working-directory: build-win
+        run: |
+          set -euo pipefail
+          timeout 600 $WINE ./rewind_tests.exe --force-colors=off | tail -5
+
+      - name: Run the command line under wine, and compare with Linux
+        run: |
+          set -euo pipefail
+          cd build-win
+          $WINE ./rewind.exe --version
+          $WINE ./rewind.exe record --seed 2 --variant buggy --out win-bug.rwd || test $? -eq 1
+          $WINE ./rewind.exe record --seed 2 --variant fixed --out win-clean.rwd
+          $WINE ./rewind.exe replay win-clean.rwd
+          cd ..
+          ./build-linux/rewind record --seed 2 --variant buggy --out lin-bug.rwd || test $? -eq 1
+          ./build-linux/rewind record --seed 2 --variant fixed --out lin-clean.rwd
+          # The trace is a file format, not a memory dump: the same run on the other
+          # system, with another compiler and another C library, is the same bytes.
+          cmp build-win/win-bug.rwd lin-bug.rwd
+          cmp build-win/win-clean.rwd lin-clean.rwd
+          # And a trace made on Linux replays on Windows.
+          $WINE build-win/rewind.exe replay lin-clean.rwd
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          version=$(./build-linux/rewind --version | awk '{print $2}')
+          name=rewind-$version-windows-x86_64
+          mkdir -p dist/$name
+          cp build-win/rewind.exe dist/$name/
+          x86_64-w64-mingw32-strip dist/$name/rewind.exe
+          cp README.md LICENSE CHANGELOG.md dist/$name/
+          cat > dist/$name/BINARIES.txt <<TXT
+          rewind $version for Windows x86-64.
+
+            rewind.exe  the command line. One static executable: it needs nothing
+                        installed. Run it from a terminal (cmd, PowerShell, Windows
+                        Terminal), e.g.:  rewind.exe hunt --from 1 --to 100 --save bug.rwd
+
+          The viewer (rewind-gui) is not built for Windows; under WSL2 the Linux build
+          opens it. This build is cross-compiled with MinGW and is tested under Wine in
+          CI, with the same unit tests as on Linux; it has not been checked by a person
+          on a Windows machine, so if something is wrong here, that is worth an issue.
+
+          Nothing in rewind has run on a real microcontroller yet; the README says what
+          that means.
+          TXT
+          (cd dist && zip -qr $name.zip $name && sha256sum $name.zip > $name.zip.sha256 && cat $name.zip.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rewind-windows-x86_64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error

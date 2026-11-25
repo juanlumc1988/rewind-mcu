@@ -336,3 +336,11 @@ jobs:
               echo "find_package(rewind $refused) should have been refused"; exit 1
             fi
           done
+
+  # What a release would ship, built and run on every change rather than on the
+  # day of the release. The same workflow release.yml uses.
+  binaries:
+    name: binaries
+    uses: ./.github/workflows/binaries.yml
+    with:
+      retention-days: 3

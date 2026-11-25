@@ -5,6 +5,18 @@ not claim is in the [README](README.md#what-this-does-not-do-yet): the host side
 is complete and tested; the device side has been cross-compiled and run on an
 emulated Cortex-M4, and never on a part.
 
+## [Unreleased]
+
+### Added
+
+- **Executables with each release**: for Linux x86-64, `rewind` as one static
+  executable and `rewind-gui` (which needs Qt 6); for Windows x86-64,
+  `rewind.exe`, cross-compiled with MinGW as one static executable. Built by
+  `binaries.yml` on every change, with the Windows unit suite run under Wine and
+  its traces compared byte for byte with Linux's; attached to a release by
+  `release.yml` when it is published, or on demand for a release that already
+  exists. No change to the library or to the trace format.
+
 ## [1.0.0]
 
 The first release. What is new in it, and then what it is made of.
