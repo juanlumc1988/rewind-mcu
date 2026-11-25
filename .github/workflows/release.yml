@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+# Part of rewind -- deterministic record & replay for bare-metal firmware.
+#
+# Attaches the executables to a release.
+#
+#   * When a release is published, it builds that release's tag and attaches
+#     the result. Nothing to do.
+#   * For a release that already exists (1.0.0 was published before this
+#     workflow was), run it by hand: Actions > Release binaries > Run workflow,
+#     with the tag.
+#
+# The build is the one CI runs on every push (binaries.yml), from the tag's own
+# source, so what is attached is what the tag says.
+
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of an existing release, e.g. 1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: which release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - id: pick
+        env:
+          FROM_RELEASE: ${{ github.event.release.tag_name }}
+          FROM_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag=${FROM_RELEASE:-$FROM_INPUT}
+          # A version and nothing else: it ends up in file names and a command.
+          if ! printf '%s' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "'$tag' is not a version like 1.0.0"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    needs: tag
+    uses: ./.github/workflows/binaries.yml
+    with:
+      ref: ${{ needs.tag.outputs.tag }}
+
+  attach:
+    name: attach to the release
+    needs: [tag, binaries]
+    runs-on: ubuntu-24.04
+    # Only this job can write to the repository, and only releases.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check what was built, and attach it
+        env:
+          TAG: ${{ needs.tag.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          # The version inside the files is the tag's: a mismatch means the wrong
+          # source was built, and nothing should be attached.
+          for f in rewind-*; do
+            case $f in rewind-$TAG-*) ;; *) echo "$f does not carry the version $TAG"; exit 1 ;; esac
+          done
+          sha256sum -c *.sha256
+          gh release view "$TAG" > /dev/null
+          gh release upload "$TAG" --clobber rewind-"$TAG"-linux-x86_64.tar.gz rewind-"$TAG"-linux-x86_64.tar.gz.sha256 \
+                rewind-"$TAG"-windows-x86_64.zip rewind-"$TAG"-windows-x86_64.zip.sha256
+          gh release view "$TAG" --json assets --jq '.assets[].name'

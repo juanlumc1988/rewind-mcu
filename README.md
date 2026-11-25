@@ -323,6 +323,28 @@ heap, no exceptions and no RTTI, and CMake enforces it with
 `-std=c++98 -pedantic-errors`. An `auto` in `core/` is a build failure, not a
 code-review argument.
 
+## Download
+
+Each [release](https://github.com/juanlumc1988/rewind-mcu/releases) carries
+built executables, with a `.sha256` beside each:
+
+| File | What is in it |
+|---|---|
+| `rewind-<version>-linux-x86_64.tar.gz` | `rewind`, the command line, as one static executable: any x86-64 Linux, WSL2 included, nothing to install. And `rewind-gui`, the viewer, which needs Qt 6 (built on Ubuntu 24.04: `sudo apt install libqt6widgets6`). |
+| `rewind-<version>-windows-x86_64.zip` | `rewind.exe`, the command line, as one static executable that needs nothing installed. There is no viewer for Windows; under WSL2 the Linux one opens a window. |
+
+```console
+$ sha256sum -c rewind-1.0.0-linux-x86_64.tar.gz.sha256
+$ tar xzf rewind-1.0.0-linux-x86_64.tar.gz && cd rewind-1.0.0-linux-x86_64
+$ ./rewind hunt --from 1 --to 100 --save bug.rwd
+```
+
+They are built in CI on every change (`binaries.yml`), not on the day of the
+release, and attached by `release.yml`. The Windows one is cross-compiled with
+MinGW; in CI its whole unit suite runs under Wine and the traces it writes are
+compared byte for byte with the Linux build's. Nobody has run it on a Windows
+machine yet, so it is the least proven of the two.
+
 ## Build and test
 
 Needs CMake 3.16+, Ninja, and a C++17 compiler for the host side. No library
