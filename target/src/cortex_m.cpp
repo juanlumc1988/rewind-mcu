@@ -21,7 +21,7 @@ bool enable_cycle_counter() {
 // dma_ is not cleared: entries past dma_count_ are never read. And ops_.dma_read
 // is left null until a region is registered, so a firmware that does no DMA does
 // not pull s_dma_read into flash -- --gc-sections can drop it.
-HardwareHal::HardwareHal() : dma_count_(0) {
+HardwareHal::HardwareHal() : dma_count_(0), ref_read_(0), ref_ctx_(0) {
     ops_.read32   = &HardwareHal::s_read32;
     ops_.write32  = &HardwareHal::s_write32;
     ops_.now      = &HardwareHal::s_now;
@@ -39,7 +39,25 @@ void HardwareHal::s_write32(void*, u32 addr, u32 value) {
 }
 
 u64 HardwareHal::s_now(void* ctx) {
-    return static_cast<HardwareHal*>(ctx)->clock_.extend(raw_read32(kDwtCyccnt));
+    return static_cast<HardwareHal*>(ctx)->extend_cycles(raw_read32(kDwtCyccnt));
+}
+
+// The two readings should be taken at the same moment; they are a few cycles
+// apart, which is nothing against a reference tick of thousands.
+u64 HardwareHal::extend_cycles(u32 raw) {
+    if (ref_read_ != 0) {
+        return clock_.extend(raw, ref_read_(ref_ctx_));
+    }
+    return clock_.extend(raw);
+}
+
+bool HardwareHal::set_reference_clock(ReferenceFn read, void* ctx, u32 cycles_per_tick) {
+    if (read == 0 || !clock_.set_reference(cycles_per_tick)) {
+        return false;
+    }
+    ref_read_ = read;
+    ref_ctx_  = ctx;
+    return true;
 }
 
 bool HardwareHal::add_dma_region(u32 id, const volatile u8* base, u32 size) {

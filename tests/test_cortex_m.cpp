@@ -110,3 +110,39 @@ TEST_CASE("a vector entry without a frame still records the interrupt") {
     CHECK(events[0].addr  == 2u);
     CHECK(events[0].value == 0u);
 }
+
+// -- CYCCNT's wraps, counted with a second clock --
+
+namespace {
+
+rwd::u32 fake_reference(void* ctx) {
+    return *static_cast<rwd::u32*>(ctx);
+}
+
+} // namespace
+
+TEST_CASE("the shim's clock counts missed CYCCNT wraps when given a reference") {
+    const rwd::u32 cpt = 5127;   // 168 MHz core, 32.768 kHz reference
+
+    // Without one it cannot see them: two whole periods and 0x1000 cycles of
+    // silence read as 0x1000.
+    rwd::cortex_m::HardwareHal alone;
+    CHECK(alone.extend_cycles(100u) == 100u);
+    CHECK(alone.extend_cycles(100u + 0x1000u) == 100u + 0x1000u);
+
+    // With one, they are found.
+    rwd::cortex_m::HardwareHal with;
+    rwd::u32 rtc = 0;
+    REQUIRE(with.set_reference_clock(&fake_reference, &rtc, cpt));
+    CHECK(with.extend_cycles(100u) == 100u);
+    const rwd::u64 elapsed = (2ULL << 32) + 0x1000u;
+    rtc = (rwd::u32)(elapsed / cpt);
+    CHECK(with.extend_cycles(100u + 0x1000u) == 100u + elapsed);
+    CHECK(with.clock().recovered() == 2u);
+
+    // And it is not accepted when it could not work.
+    rwd::cortex_m::HardwareHal bad;
+    CHECK_FALSE(bad.set_reference_clock(0, &rtc, cpt));
+    CHECK_FALSE(bad.set_reference_clock(&fake_reference, &rtc, 0u));
+    CHECK(bad.extend_cycles(5u) == 5u);
+}

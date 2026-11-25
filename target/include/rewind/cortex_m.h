@@ -86,6 +86,19 @@ public:
     const HalOps* ops() const { return &ops_; }
     ClockExtender& clock() { return clock_; }
 
+    // A second, slower clock to count CYCCNT's wraps with -- see clock.h for
+    // what it buys. `read` returns a free-running tick count (an RTC's, say),
+    // `cycles_per_tick` is how many core cycles one tick is. The shim then
+    // reads it next to CYCCNT at every timestamp, so it has to be cheap: a
+    // single register read. False if cycles_per_tick is zero or too coarse.
+    typedef u32 (*ReferenceFn)(void* ctx);
+    bool set_reference_clock(ReferenceFn read, void* ctx, u32 cycles_per_tick);
+
+    // The 64-bit time for a CYCCNT reading, as the shim computes it for every
+    // timestamp: takes the reference clock's reading as well when there is one.
+    // Public so the arithmetic can be tested on a machine with no DWT.
+    u64 extend_cycles(u32 raw);
+
     // Tells the shim where DMA region `id` lives: `size` bytes at `base`, the
     // RAM a DMA controller writes and the firmware reads with hal_dma_read().
     // The ids are the firmware's own, and must be the same ones the host build
@@ -113,6 +126,8 @@ private:
 
     HalOps        ops_;
     ClockExtender clock_;
+    ReferenceFn   ref_read_;
+    void*         ref_ctx_;
 };
 
 } // namespace cortex_m
