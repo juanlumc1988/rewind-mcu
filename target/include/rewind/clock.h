@@ -33,7 +33,7 @@
 // be right to within half a period (2^31 cycles, 12.8 s at 168 MHz), which is
 // a loose demand: a 32.768 kHz RTC against a 168 MHz core is good to a few
 // thousand cycles per sample, and a crystal that is 200 ppm off moves a
-// four-period silence by under three million. What it cannot rescue is a
+// four-period silence by about three and a half million. What it cannot rescue is a
 // reference that is itself wrong by that much -- the wrong cycles-per-tick,
 // or a counter that was reset -- so a sample where the two disagree by more
 // than a quarter period is counted in doubtful() instead of being believed

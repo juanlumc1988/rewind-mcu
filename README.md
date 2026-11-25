@@ -10,15 +10,18 @@ on your workstation, with no hardware and no simulator involved. A failure
 that happens once a week in the field becomes a file you can reproduce on
 demand.
 
-**Status.** Recording, replay and reverse execution work end to end. The
-device-side path — ring buffer, drain loop, cycle-counter extension,
-Cortex-M backend — is written, cross-compiles to a Cortex-M4 on every push,
-and is tested on the host.
+**Status: 1.0.** Recording, replay, reverse execution, trace comparison and a
+viewer work end to end, on the example firmware and on a firmware of your own
+(see [Your own firmware](#your-own-firmware)). The device-side path — ring
+buffer, drain loop, cycle-counter extension, Cortex-M backend — is written,
+cross-compiles to a Cortex-M4 on every push, and is tested on the host, with its
+interrupt trampoline run on an emulated Cortex-M4.
 
-**It has never run on real silicon.** That is the gap that matters, and it
-is not a small one: see
-[What this does not do yet](#what-this-does-not-do-yet) before relying on
-any of this.
+**It has never run on real silicon.** 1.0 means the host side is complete and
+tested and the interfaces are settled; it does not mean the device side has been
+proven on a part. That is the gap that matters, and it is not a small one: see
+[What this does not do yet](#what-this-does-not-do-yet) before relying on any
+of this.
 
 ## The problem
 
@@ -190,6 +193,7 @@ the firmware's state just before it
         tail            3            4
      pending            0            1
     consumed           19           20
+    checksum   3450220246   3877612667
 ```
 
 The same seed, so the same interrupts arrive, and the two runs agree for 2088
@@ -239,6 +243,66 @@ a window with no screen. The state column needs the firmware to be one this
 build can run, as for `rewind inspect`; for any other trace the timeline and
 the lists work and the variables show a dash.
 
+## Your own firmware
+
+Nothing in the tools is specific to the example. A firmware that reaches its
+hardware through the shim (`mmio_read32`, `hal_set_isr`, ...) can be replayed,
+walked backwards, compared and viewed by implementing one interface,
+[`rwhost::Firmware`](host/include/rewind/firmware.h): how to start it, run some
+iterations of its main loop, and save and restore its state.
+
+```cpp
+class Thermostat : public rwhost::Firmware {
+public:
+    void reset() override   { thermostat::reset(); }
+    void install() override { thermostat::install(); }        // hal_set_isr, ...
+    void run(u32 n) override { thermostat::run(n); }
+    std::size_t state_size() const override { return sizeof(State); }
+    void save_state(u8* out) const override;                  // memcpy the state
+    void restore_state(const u8* in) override;
+    // optional: describe_state() names the variables for the viewer and diff
+};
+```
+
+[`examples/custom-firmware`](examples/custom-firmware) is a whole one: a
+thermostat whose device code is C++98 against the shim, a model of its hardware
+to run it against, that adapter, and a program that records it, replays the
+file alone, walks the run (*when did the heater first switch three times?*) and
+records from the middle, checking each step. CI builds that device code for a
+Cortex-M4, against the installed device-side libraries, under the device's rules.
+
+It builds inside this repository (`-DREWIND_BUILD_EXAMPLES=ON`) and, the way
+your project would, against an installed package:
+
+```console
+cmake --install build --prefix /some/prefix
+cmake -S examples/custom-firmware -B ex -DCMAKE_PREFIX_PATH=/some/prefix
+```
+
+```cmake
+find_package(rewind 1 REQUIRED)       # any 1.x; another major is refused
+target_link_libraries(my_device_code PRIVATE rewind::target)   # shim, recorder
+target_link_libraries(my_host_tool   PRIVATE rewind::host)     # replay, timeline, diff
+target_link_libraries(my_viewer      PRIVATE rewind::gui)      # if installed with it
+```
+
+Install from the cross-compiled build for the device-side libraries and from the
+host build for the host ones; a cross build installs only what runs on the part.
+The viewer is the same window as `rewind-gui`, told which firmware a trace is for:
+`MainWindow::setFirmwareFactory`, `TraceDoc::set_firmware_factory`.
+
+What the `rewind` command line does with a firmware that is not the example:
+`dump`, `landings` and `diff` read any trace (`diff` compares the events of any
+two; the state's variables it shows only for the example's, because a tool has to
+be told which firmware a build id means -- yours links `TraceDoc` with its own
+factory); `record`, `hunt`, `replay`, `inspect` and `locate` run the example
+firmware, and for yours the same operations are
+`record_firmware`, `replay_firmware`, `Timeline` and `locate_firmware` in
+[`session.h`](host/include/rewind/session.h) and
+[`timeline.h`](host/include/rewind/timeline.h). One thing to get right: the state
+you save has to be *all* of it. A variable left out is one a checkpoint does not
+restore, and the replay from that checkpoint then differs from the run.
+
 ## Architecture
 
 Two worlds, kept apart by the build system rather than by discipline.
@@ -249,9 +313,10 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `target/`   | HAL shim, recorder, cycle-counter extension, Cortex-M backend | C++98 |
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
-| `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `gui/`      | `rewind-gui`, the Qt viewer (optional)         | C++17, Qt 6 |
-| `tests/`    | 192 cases, 5.4 million assertions              | C++17 |
+| `host/`     | Replay engine, timeline, diff, the `Firmware` interface, CLI | C++17 |
+| `gui/`      | `rewind-gui`, the Qt viewer (optional); 19 cases | C++17, Qt 6 |
+| `examples/` | A thermostat: a firmware of one's own, built against the installed package | C++98 / C++17 |
+| `tests/`    | 242 cases, 5.4 million assertions              | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -286,8 +351,8 @@ ctest --test-dir build
 CI runs this on GCC and Clang, in Debug and RelWithDebInfo, with warnings as
 errors; separately under ASan and UBSan; separately again cross-compiled to a
 Cortex-M4; again with the Cortex-M interrupt trampoline run on an emulated one
-(see below); and once more with the viewer built and its tests run on both
-compilers.
+(see below); with the viewer built and its tests run on both compilers; and with
+the package installed and a project of its own built against it.
 
 Cross-compiling the libraries that would ship on the device needs the
 `arm-none-eabi` toolchain (`sudo apt install gcc-arm-none-eabi` on
@@ -298,6 +363,13 @@ just to build and test on the host:
 cmake -S . -B build-arm -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
       -DREWIND_BUILD_TESTS=OFF
 cmake --build build-arm --target rewind_core rewind_target
+```
+
+To install it, so another project can `find_package(rewind)` (see
+[Your own firmware](#your-own-firmware)):
+
+```console
+cmake --install build --prefix /some/prefix
 ```
 
 The viewer is off by default, because it is the only part that needs Qt. With
@@ -446,6 +518,55 @@ detects. That is the same discipline the model asks of registers, and it is
 the price of not being able to see a DMA deposit. DMA that only *reads* RAM (a
 transmit buffer) is output, not input, and needs nothing.
 
+### Starting in the middle of a run
+
+Replay re-executes the firmware, so it is only faithful from the state the
+recording began in. From reset that is given. Keeping only the stretch before a
+failure -- the lead-up is not worth the bytes -- needs that state in the trace.
+The firmware says which parts of its RAM are its state, and the recorder writes
+them ahead of the first event (trace format 6, `EV_RAM`):
+
+```cpp
+rwd::hal_state_region(0, &g_state, sizeof(g_state));   // once, at start-up
+...                                                    // the firmware runs
+recorder.start();
+rwd::hal_snapshot();                                   // at a quiet point
+```
+
+Replay finds the image, hands it to `Firmware::restore_region` and starts after
+it; the timeline's first checkpoint and `rewind locate` do the same, and walking
+backwards ends at the image. With the example firmware:
+
+```console
+$ rewind record --seed 2 --iters 3000 --skip 3000 --out half.rwd
+$ rewind dump half.rwd --limit 5
+     cycle  what   addr       register      value
+      9213  ram    region 0 +0    len 16  97D4D391FE526280069A0078CF302CE0
+      ...
+$ rewind replay half.rwd --iters 3000      # ends in the state the whole run did
+```
+
+`--iters` counts the recorded iterations, and replay takes the same. What it
+costs: the size of the regions, plus about five bytes per sixteen, once -- it is
+for state measured in tens of bytes, not a framebuffer. What it asks: take it
+where the state is whole (between iterations of the main loop, not in a handler
+or a critical section), and declare all of it, as above. The image is the
+firmware's state, not the part's: the registers' contents come from the trace as
+before.
+
+### Interrupt priorities
+
+By default one handler never interrupts another. Give the vectors priorities
+(`hal_set_irq_priority`, Cortex-M style: smaller is more urgent) and, with a
+backend that models them -- the simulator and replay do -- a handler's own
+register accesses are where a more urgent interrupt is taken, at any depth. The
+trace needs nothing new: the nesting is in the order of its events. Replay nests
+the same way if the firmware sets the same priorities, and reports a divergence
+if it does not. On a part the NVIC does the arbitrating; the firmware tells the
+shim the numbers it programs into it, so a trace from the part replays with the
+same nesting. Details in
+[`docs/design/execution-model.md`](docs/design/execution-model.md).
+
 ## On the device
 
 `Recorder` is what firmware instantiates. It owns a `TraceWriter`, a
@@ -476,24 +597,29 @@ Built for a Cortex-M4 at `-Os`, measured in CI on every push:
 
 | Object | text (flash) | bss |
 |---|---:|---:|
-| `trace_writer.cpp` | 1360 | 0 |
-| `hal.cpp` | 977 | 50 |
+| `trace_writer.cpp` | 1676 | 0 |
+| `hal.cpp` | 1361 | 113 |
 | `ring_buffer.cpp` | 334 | 0 |
 | `recorder.cpp` | 278 | 0 |
 | `varint.cpp` | 166 | 0 |
 | `crc32.cpp` | 140 | 0 |
-| `cortex_m.cpp` | 330 | 0 |
-| `clock.cpp` | 98 | 0 |
-| **recording total** | **3683** | **50** |
-| `trace_reader.cpp` | 2307 | 0 |
+| `cortex_m.cpp` | 406 | 0 |
+| `clock.cpp` | 276 | 0 |
+| **recording total** | **4637** | **113** |
+| `trace_reader.cpp` | 2671 | 0 |
 
-**Roughly 3.7 KB of flash and 50 bytes of .bss to record,** of which 500 bytes is
-DMA support (`TraceWriter::dma`, `hal_dma_read` and the device backend's region
-table). Those are separate functions: a firmware that does no DMA links none of
-them (a link of the QEMU test program, which does none, has no DMA symbol
-in it). The reader is
-only linked in if the device replays its own traces — useful after a
-watchdog reset, and discarded by `--gc-sections` otherwise.
+**Roughly 4.6 KB of flash and 117 bytes of RAM (.bss and .data) to record.** That
+is the library as built, with everything in it: of the flash, 500 bytes is DMA
+support (`TraceWriter::dma`, `hal_dma_read` and the device backend's region
+table), 450 the memory image (`hal_state_region`, `hal_snapshot`,
+`TraceWriter::ram`) and 60 setting a reference clock. Those are separate
+functions: a firmware that uses none of them links none of them (a link of the
+QEMU test program, which does not, has none of those symbols in it). The
+priorities and the reference clock's arithmetic are in the totals above and are
+not optional: about 180 bytes of the clock's are linked with `HardwareHal`
+whether or not a reference is set. The reader is only linked in if the device
+replays its own traces -- useful after a watchdog reset, and discarded by
+`--gc-sections` otherwise.
 
 CI also asserts that none of this pulls in `malloc`, `_Unwind`, `__cxa_throw`
 or `typeinfo`. The claim that the target side has no heap, no exceptions and
@@ -551,8 +677,22 @@ sample, so firmware that touches a peripheral even once a second has
 twenty-five times the margin it needs.
 
 Firmware that goes quiet for longer than a wrap period can still skip one,
-and the counter alone cannot tell one wrap from two. That is not fixable
-here, so `suspicious()` reports the doubt instead of hiding it.
+and the counter alone cannot tell one wrap from two. That is fixed with a
+second, slower clock -- an RTC, a low-power timer, a millisecond tick; any
+free-running counter that does not itself wrap in the longest silence:
+
+```cpp
+hardware.set_reference_clock(&rtc_ticks, 0, 5127);   // a read; core cycles per tick
+```
+
+The counter says how far it moved modulo 2^32, the reference says roughly how
+much time passed, and together they say how many whole periods went by. The
+reference only has to be right to within half a period (12.8 seconds at 168 MHz):
+a 32.768 kHz RTC is good to a few thousand cycles, and a crystal 200 ppm off
+moves a six-period silence by about five million, a thousandth of a period. A
+wrong calibration is not believed quietly: samples where the two disagree by
+more than a quarter period are counted in `doubtful()`. Without a reference,
+`suspicious()` still reports the doubt instead of hiding it.
 
 ## What this does not do yet
 
@@ -575,12 +715,20 @@ Stated plainly, because the gap between this and the pitch is real:
   example firmware's `unguarded` variant uses. `rewind landings` reports the
   interrupts that landed too far from any crossing, and `rewind locate`
   searches for where they landed in a trace recorded without probe points.
-  None of it has been tried on a part. See
+  None of it has been tried on a part. Handlers that preempt each other by
+  priority are modelled, but only as far as the firmware reports its priorities
+  to the shim; masking is all-or-nothing, as PRIMASK is, with nothing like
+  BASEPRI. See
   [`docs/design/execution-model.md`](docs/design/execution-model.md).
 - **Reverse execution stops at iteration boundaries for checkpoints.** Seeks
   land on an exact event, but a checkpoint can only be taken where no call is
   in progress. Fine here; a firmware with a deeply nested main loop would
   want finer granularity, which needs the call stack captured too.
+- **A state image is only as good as the firmware's declaration of it.** The
+  recorder writes the regions the firmware named; a variable it left out is one
+  a replay from the middle of a run does not have, and the replay then diverges
+  for a reason that looks like a firmware bug. Nothing here can see a variable
+  that was not declared.
 - **No transport.** `drain()` takes a function pointer and the tests feed it a
   simulated UART. No SWO, RTT or real UART driver ships here.
 - **CPU overhead is unmeasured.** Flash cost is now measured in CI (3.7 KB to
@@ -599,6 +747,16 @@ Stated plainly, because the gap between this and the pitch is real:
    held in CI.
 3. DMA events. Done: see [DMA](#dma).
 4. Qt timeline and two-trace diffing. Done: see [The viewer](#the-viewer).
+5. Firmware of one's own, an installable package, recordings that start
+   mid-run, nested interrupts and a second clock for CYCCNT's wraps. Done in
+   1.0: see [Your own firmware](#your-own-firmware),
+   [Starting in the middle of a run](#starting-in-the-middle-of-a-run),
+   [Interrupt priorities](#interrupt-priorities) and
+   [Timestamps](#timestamps).
+
+What 1.0 leaves, apart from items 1 and 2: finer checkpoints (a firmware with a
+deeply nested main loop would want the call stack captured), and the exporter to
+bitwise-bus, which waits on its capture format.
 
 ## Related projects
 

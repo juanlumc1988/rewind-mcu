@@ -290,9 +290,42 @@ than the wrap period, and every recorded MMIO access is a sample.
 Firmware that goes quiet for longer than a period — deep sleep, a long
 computation, a halted debugger — can skip a wrap, and the counter alone
 cannot distinguish one wrap from two: the evidence is identical. Nothing
-clever fixes that; it needs a second, slower clock. `suspicious()` counts
-sample gaps beyond half a period so the doubt is reported rather than
-buried.
+clever fixes that from the counter alone; it needs a second, slower clock, and
+with one it is fixed. `suspicious()` counts sample gaps beyond half a period
+so that, without a reference, the doubt is reported rather than buried.
+
+### A second clock
+
+Any free-running counter that does not wrap during the longest silence will do
+— an RTC, a low-power timer, a millisecond tick — and it need not be precise.
+`HardwareHal::set_reference_clock(read, ctx, cycles_per_tick)` gives the shim a
+read of it, taken next to every CYCCNT reading. Between two samples:
+
+- the counter moved `step` cycles, modulo 2^32;
+- the reference moved `ticks` ticks (also modulo 2^32, so it may wrap itself,
+  provided not twice between samples), which is about `estimate = ticks *
+  cycles_per_tick` cycles in all;
+- the periods that hid in the gap are whatever makes `step + periods * 2^32`
+  closest to `estimate`: `periods = round((estimate - step) / 2^32)`, or none if
+  the estimate is below the step.
+
+That is a multiply, a subtraction and two shifts: no division, so nothing from
+the compiler's runtime on a part without a divider.
+
+The reference has to be right to within half a period, 2^31 cycles — 12.8
+seconds at 168 MHz — which is a loose demand. A 32.768 kHz RTC against a 168 MHz
+core is good to a few thousand cycles (one tick is 5127), and the estimate is
+taken between *consecutive samples*, not from the start of the run, so drift does
+not accumulate: a crystal 200 ppm off moves a six-period silence by about five
+million cycles. `tests/test_clock.cpp` sweeps a hundred thousand random silences
+of up to six periods, with the reference 200 ppm fast and 200 ppm slow and
+quantised to a tick, and the extended time is exact every time.
+
+What it cannot rescue is a reference that is itself wrong by that much: the wrong
+`cycles_per_tick`, or a counter that was reset. A sample where the two disagree
+by more than a quarter period — the warning, well before half — is counted in
+`doubtful()` instead of being believed quietly. A tick longer than an eighth of
+a period is refused as too coarse to count periods with.
 
 ## Divergence
 
@@ -395,6 +428,41 @@ The firmware's RAM is not in the trace. Replay reconstructs it by
 re-executing, which is what makes traces small — kilobytes, not megabytes.
 
 The consequence is that replay must start from the same initial state as the
-recording. Right now that means starting from reset. Recording from an
-arbitrary point would need an initial RAM snapshot in the header, which is
-straightforward and not yet done.
+recording. From reset, that is given. From anywhere else it has to be in the
+trace, and it can be: a memory image.
+
+### Starting in the middle of a run
+
+The firmware declares which parts of its RAM are its state
+(`hal_state_region(id, base, size)`, at start-up, with the ids its host build
+gives to `Firmware::restore_region`), and `hal_snapshot()`, called once after
+recording starts and before anything is recorded, writes them into the trace as
+`EV_RAM` events (format version 6): the region, an offset, and up to
+`kMaxRamChunk` (16) bytes, in chunks, all at the timestamp the snapshot was
+taken. They are an image, not an input, and three rules follow from that:
+
+- They come first. The writer refuses a snapshot after any other event, and the
+  reader refuses an `EV_RAM` that follows one: an image of where the run began
+  that came after it began is not that.
+- Replay does not serve them. `ReplayHal` keeps them in the event list, so an
+  index means the same to a reader, the timeline and the viewer, but its cursor
+  starts after them, and `first_event()` says where. Seeking before it is
+  seeking to it.
+- They are put back before the firmware runs. `start_firmware()` is reset,
+  install, then `restore_region` for each region of the image; a plain replay, a
+  timeline's first checkpoint and every run of the landing search start there. A
+  firmware that refuses a region is told so and stops, and does not run from a
+  state that is not the recording's.
+
+Iteration boundaries are where a snapshot is whole — no call in progress, the
+interrupt mask balanced — which is the same constraint as for checkpoints, and
+for the same reason. `main_iters` counts the iterations *recorded*, and replay is
+given the same number.
+
+What it cannot check is that the declaration is complete. A variable that is in
+no region is one the replay does not have; if it matters, the replay diverges,
+and from outside that looks like a firmware bug. `tests/test_ram.cpp` shows the
+good case from every angle it can: over a sweep of seeds, variants and start
+points, a run recorded from the middle replays to exactly the state the whole
+run has at the same point, and a timeline over it walks backwards to the image.
+It costs the size of the regions plus about five bytes per sixteen, once.
