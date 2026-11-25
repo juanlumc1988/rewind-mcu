@@ -192,3 +192,53 @@ jobs:
 
       - name: Run the trampoline under QEMU
         run: tests/qemu/run.sh build-arm
+
+  # The viewer needs Qt, so it is its own job and off in the others. Its tests
+  # drive the real widgets with mouse, wheel and keys on a window with no
+  # screen (the offscreen platform plugin), and the last step renders a window
+  # the way the documentation's picture is made, to prove that path works too.
+  viewer:
+    name: rewind-gui (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools and Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+                ninja-build cmake g++ clang qt6-base-dev fonts-dejavu-core
+
+      - name: Configure
+        env:
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+        run: |
+          cmake -S . -B build-gui -G Ninja \
+                -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_CXX_COMPILER=$CXX \
+                -DREWIND_WERROR=ON \
+                -DREWIND_BUILD_GUI=ON
+
+      - name: Build
+        run: cmake --build build-gui -j
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build-gui --output-on-failure
+
+      - name: Render a comparison
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          # The buggy run exits 1 by design; the clean one exits 0.
+          ./build-gui/rewind record --seed 2 --variant buggy --out /tmp/buggy.rwd || test $? -eq 1
+          ./build-gui/rewind record --seed 2 --variant fixed --out /tmp/fixed.rwd
+          ./build-gui/rewind-gui /tmp/buggy.rwd /tmp/fixed.rwd --first-diff \
+                --screenshot /tmp/viewer.png --size 1180x720
+          test "$(stat -c %s /tmp/viewer.png)" -gt 50000
