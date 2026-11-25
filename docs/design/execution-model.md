@@ -16,7 +16,7 @@ For bare-metal code the input set is small and closed:
 | Peripheral register read | `EV_MMIO_READ` | implemented |
 | Interrupt arrival | `EV_IRQ_ENTER`, `EV_IRQ_AT` | recorded; replayed at MMIO accesses only |
 | Clock read | an MMIO read of the timer | implemented |
-| DMA-deposited memory | `EV_DMA` | designed, not implemented |
+| DMA-deposited memory | `EV_DMA` | implemented: recorded when the firmware reads it |
 
 Everything else the firmware does — arithmetic, control flow, writes to its
 own RAM — is a consequence of those inputs and needs no recording.
@@ -298,6 +298,48 @@ The device can also see it at the time: `Recorder::healthy()` is false,
 `blocks_lost()` says how many, and `ring().high_water()` says how close the
 buffer came to coping. `rewind sizing` sweeps capacities and reports all
 three.
+
+## DMA
+
+A DMA controller writes RAM with no CPU involved. Nothing on a part observes
+the deposit: the shim sits between the firmware and the hardware, and a
+controller is hardware that never goes through it.
+
+There were two ways to record it. One is to record the *deposit*: an event when
+the data lands, applied to the firmware's memory at the right point in replay.
+That needs two things the device cannot give: to know when it landed, and to
+know what landed without copying the buffer on every access. It would also
+bring back the problem the interrupt landing has, because a deposit is
+asynchronous and replay can only apply it at a crossing.
+
+The other is to record the *look*. The firmware reads a DMA buffer through the
+shim (`hal_dma_read`), and each read is recorded with the bytes it saw. What the
+firmware sees is a function of the trace and nothing else, which is the
+property replay needs; when the DMA wrote it does not matter, only what was
+there when the firmware looked. It is an access like any register read, so the
+position is exact, and there is nothing to search for. `EV_DMA` is that record:
+a buffer id, an offset, and up to 16 bytes, with longer reads split the same
+way on record and replay (the block buffer is caller-supplied and may be only 64
+bytes, so a larger event could not be promised to fit).
+
+The cost is a rule for the firmware: DMA memory is read through the shim, not
+dereferenced. A direct read is invisible to the recorder, and in replay it sees
+whatever the host buffer holds; nothing can detect that, so it is documented
+rather than checked. It is the same rule registers already have, and for the
+same reason.
+
+The buffer is named by id, because a device address means nothing on the host.
+The firmware registers the same ids on both; on a part,
+`HardwareHal::add_dma_region` records where each lives, and a read of an
+unregistered region or past its end gives zeros, which the trace then records
+like any other value.
+
+Replay checks a DMA read against the trace as it checks an access: region,
+offset and length must match the next event, or the run diverges. The
+simulator's DMA model (`Mcu::enable_dma`) is a ring written whenever a byte
+arrives, with a count register the firmware polls; it is lapped if the firmware
+is slow, and `tests/test_dma.cpp` records such an overrun and replays it,
+losing the same bytes.
 
 ## Reverse execution
 

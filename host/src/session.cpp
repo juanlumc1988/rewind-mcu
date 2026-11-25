@@ -51,6 +51,9 @@ BufferedResult record_buffered(const BufferedConfig& cfg) {
     BufferedResult result;
 
     sim::Mcu        mcu(cfg.run.seed, cfg.run.tx_total);
+    if (cfg.run.variant == fw::kDma) {
+        mcu.enable_dma();
+    }
     rwd::Recorder   recorder;
     std::vector<u8> ring(cfg.ring_capacity);
     std::vector<u8> block(kBlockBufferBytes);
@@ -102,6 +105,7 @@ u64 build_id_for(fw::Variant variant) {
     switch (variant) {
         case fw::kFixed:     return kBuildIdFixed;
         case fw::kUnguarded: return kBuildIdUnguarded;
+        case fw::kDma:       return kBuildIdDma;
         default:             return kBuildIdBuggy;
     }
 }
@@ -109,6 +113,10 @@ u64 build_id_for(fw::Variant variant) {
 bool variant_for_build_id(u64 build_id, fw::Variant* out) {
     if (build_id == kBuildIdBuggy) {
         *out = fw::kBuggy;
+        return true;
+    }
+    if (build_id == kBuildIdDma) {
+        *out = fw::kDma;
         return true;
     }
     if (build_id == kBuildIdUnguarded) {
@@ -126,6 +134,9 @@ RecordResult record_run(const RunConfig& cfg) {
     RecordResult result;
 
     sim::Mcu            mcu(cfg.seed, cfg.tx_total);
+    if (cfg.variant == fw::kDma) {
+        mcu.enable_dma();
+    }
     VectorSink          sink;
     rwd::TraceWriter writer;
     u8                  block[kBlockBufferBytes];

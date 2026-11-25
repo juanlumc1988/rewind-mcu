@@ -161,9 +161,12 @@ extern "C" void reset_handler() {
     finish_run(a && b ? 0 : 1);
 }
 
-// The libraries contain compiler-generated memset calls; a real firmware gets
-// them from its libc. Built with -fno-tree-loop-distribute-patterns so this
+// The libraries contain compiler-generated memset and memcpy calls; a real
+// firmware gets them from its libc. Built with -fno-tree-loop-distribute-patterns so this
 // loop is not turned back into a call to itself.
 extern "C" void* memset(void* d, int c, unsigned n) {
     u8* p = (u8*)d; while (n--) *p++ = (u8)c; return d;
+}
+extern "C" void* memcpy(void* d, const void* s, unsigned n) {
+    u8* p = (u8*)d; const u8* q = (const u8*)s; while (n--) *p++ = *q++; return d;
 }

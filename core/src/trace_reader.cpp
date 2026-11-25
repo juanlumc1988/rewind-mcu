@@ -165,6 +165,7 @@ bool TraceReader::next(Event* out) {
     bool is_mmio = false;
     bool has_arg = false;
     bool has_pc  = false;
+    bool is_dma  = false;
     switch (type) {
         case EV_MMIO_READ:
         case EV_MMIO_WRITE: is_mmio = true;  has_arg = true;  break;
@@ -186,6 +187,13 @@ bool TraceReader::next(Event* out) {
             }
             is_mmio = false; has_arg = true;
             break;
+        case EV_DMA:
+            if (hdr_.version < 5) {
+                done_ = true;
+                return fail("unknown event type");
+            }
+            is_mmio = false; has_arg = false; is_dma = true;
+            break;
         default:
             done_ = true;
             return fail("unknown event type");
@@ -202,6 +210,57 @@ bool TraceReader::next(Event* out) {
 
     u32 addr  = 0;
     u32 value = 0;
+    u8  dma_len = 0;
+    u8  dma_data[kMaxDmaChunk];
+    for (u32 i = 0; i < kMaxDmaChunk; ++i) {
+        dma_data[i] = 0;
+    }
+
+    if (is_dma) {
+        u64 raw = 0;
+        n = varint_decode(data_ + pos_ + off, avail - off, &raw);
+        if (n == 0) {
+            done_ = true;
+            return fail("malformed dma region varint");
+        }
+        if (raw > 0xFFFFFFFFu) {
+            done_ = true;
+            return fail("dma region does not fit in 32 bits");
+        }
+        off += n;
+        addr = (u32)raw;
+
+        n = varint_decode(data_ + pos_ + off, avail - off, &raw);
+        if (n == 0) {
+            done_ = true;
+            return fail("malformed dma offset varint");
+        }
+        if (raw > 0xFFFFFFFFu) {
+            done_ = true;
+            return fail("dma offset does not fit in 32 bits");
+        }
+        off += n;
+        value = (u32)raw;
+
+        if (off >= avail) {
+            done_ = true;
+            return fail("dma event cut short before its length");
+        }
+        dma_len = data_[pos_ + off];
+        off += 1;
+        if (dma_len == 0 || dma_len > kMaxDmaChunk) {
+            done_ = true;
+            return fail("dma length is zero or longer than kMaxDmaChunk");
+        }
+        if (avail - off < (u32)dma_len) {
+            done_ = true;
+            return fail("dma event cut short before its data");
+        }
+        for (u32 i = 0; i < (u32)dma_len; ++i) {
+            dma_data[i] = data_[pos_ + off + i];
+        }
+        off += (u32)dma_len;
+    }
 
     if (has_arg) {
         u64 raw = 0;
@@ -273,6 +332,10 @@ bool TraceReader::next(Event* out) {
     out->ts    = last_ts_;
     out->addr  = addr;
     out->value = value;
+    out->len   = dma_len;
+    for (u32 i = 0; i < kMaxDmaChunk; ++i) {
+        out->data[i] = dma_data[i];
+    }
 
     pos_ += off;
     return true;

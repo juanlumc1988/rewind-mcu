@@ -77,6 +77,8 @@ inline void raw_write32(u32 addr, u32 value) {
 // another source -- a general-purpose timer works, at coarser resolution.
 bool enable_cycle_counter();
 
+const u32 kMaxDmaRegions = 4;
+
 class HardwareHal {
 public:
     HardwareHal();
@@ -84,11 +86,27 @@ public:
     const HalOps* ops() const { return &ops_; }
     ClockExtender& clock() { return clock_; }
 
+    // Tells the shim where DMA region `id` lives: `size` bytes at `base`, the
+    // RAM a DMA controller writes and the firmware reads with hal_dma_read().
+    // The ids are the firmware's own, and must be the same ones the host build
+    // registers, because a trace names a buffer by id, not by address. Returns
+    // false for a null base, an empty region, a duplicate id or no room.
+    bool add_dma_region(u32 id, const volatile u8* base, u32 size);
+
 private:
     static u32  s_read32(void* ctx, u32 addr);
     static void s_write32(void* ctx, u32 addr, u32 value);
     static u64  s_now(void* ctx);
     static u32  s_poll_irq(void* ctx);
+    static void s_dma_read(void* ctx, u32 region, u32 offset, u8* dst, u32 len);
+
+    struct DmaRegion {
+        u32                id;
+        const volatile u8* base;
+        u32                size;
+    };
+    DmaRegion dma_[kMaxDmaRegions];
+    u32       dma_count_;
 
     HardwareHal(const HardwareHal&);
     HardwareHal& operator=(const HardwareHal&);

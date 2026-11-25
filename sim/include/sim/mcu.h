@@ -29,6 +29,15 @@ const u32 kUart0Base = 0x40001000u;
 const u32 kUart0Sr   = kUart0Base + 0x00u;       // RO status
 const u32 kUart0Dr   = kUart0Base + 0x04u;       // RO data; reading consumes
 
+// A DMA controller receiving the UART into a ring in RAM, with no CPU involved.
+// Only present after enable_dma(). The count is how many bytes it has deposited
+// in total; the firmware finds the bytes by reading region kDmaRegion.
+const u32 kDma0Base  = 0x40003000u;
+const u32 kDma0Count = kDma0Base + 0x00u;        // RO, bytes deposited so far
+const u32 kDmaRegion   = 0u;
+const u32 kDmaRingSize = 16u;
+const u32 kDmaReadCost = 2u;                     // cycles per chunk read
+
 const u32 kGpio0Base = 0x40002000u;
 const u32 kGpio0Odr  = kGpio0Base + 0x00u;       // RW output data
 
@@ -93,6 +102,12 @@ public:
 
     u32 gpio_odr() const { return odr_; }
 
+    // Receive through DMA instead of the UART's data register: each byte goes
+    // straight into a ring in memory, there is no interrupt, and the firmware
+    // learns how many have landed from kDma0Count. Call before the run starts.
+    void enable_dma() { dma_ = true; }
+    u32  dma_deposited() const { return dma_count_; }
+
 private:
     u64  next_random();
     void advance(u32 dt);
@@ -100,6 +115,7 @@ private:
     void write32(u32 addr, u32 value);
     u32  poll_irq();
     void site(u32 id);
+    void dma_read(u32 region, u32 offset, u8* dst, u32 len);
 
     // Trampolines: HalOps is a C-style vtable, so member calls need a hop.
     static u32  s_read32(void* ctx, u32 addr);
@@ -107,6 +123,7 @@ private:
     static u64  s_now(void* ctx);
     static u32  s_poll_irq(void* ctx);
     static void s_site(void* ctx, u32 id);
+    static void s_dma_read(void* ctx, u32 region, u32 offset, u8* dst, u32 len);
 
     Mcu(const Mcu&);
     Mcu& operator=(const Mcu&);
@@ -123,6 +140,9 @@ private:
     u8   rx_byte_;
     bool rx_pending_;    // byte sitting in DR, not yet read
     bool irq_latched_;   // edge not yet delivered to the shim
+    bool dma_;
+    u32  dma_count_;
+    u8   dma_ring_[kDmaRingSize];
 };
 
 } // namespace sim

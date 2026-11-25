@@ -11,7 +11,7 @@ namespace {
 
 bool is_crossing(u8 type) {
     return type == rwd::EV_MMIO_READ || type == rwd::EV_MMIO_WRITE
-        || type == rwd::EV_SITE;
+        || type == rwd::EV_SITE || type == rwd::EV_DMA;
 }
 
 bool is_interrupt(u8 type) {

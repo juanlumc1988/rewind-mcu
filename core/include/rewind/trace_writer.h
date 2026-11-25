@@ -70,6 +70,11 @@ public:
     // Emits EV_SITE: the firmware crossed the probe point labelled `site`.
     bool site(u64 ts, u32 site);
 
+    // Emits EV_DMA: the firmware read `len` bytes (1..kMaxDmaChunk) at
+    // `offset` in DMA region `region`, and saw `data`. A longer read is the
+    // caller's to split.
+    bool dma(u64 ts, u32 region, u32 offset, const u8* data, u32 len);
+
     // Emits EV_STOP, flushes the pending block and writes the terminator.
     bool finish(u64 ts);
 

@@ -89,6 +89,21 @@ TEST_CASE("slack is the clock distance to the last crossing, whatever its kind")
     CHECK(l[2].vector == 2u);
 }
 
+TEST_CASE("a DMA read is a crossing") {
+    // Replay delivers an interrupt right after a DMA read, as after any access.
+    std::vector<rwd::Event> events;
+    events.push_back(ev(rwd::EV_MMIO_READ, 100, 0x40000000u, 1));
+    events.push_back(ev(rwd::EV_DMA, 150, 2, 8));            // region 2, offset 8
+    events.push_back(ev(rwd::EV_IRQ_AT, 170, 1, 0x08000100u));
+
+    const std::vector<rwhost::Landing> l = rwhost::find_landings(events);
+    REQUIRE(l.size() == 1u);
+    CHECK(l[0].crossing_event == 1u);
+    CHECK(l[0].crossing_type == rwd::EV_DMA);
+    CHECK(l[0].crossing_addr == 2u);       // the region
+    CHECK(l[0].slack == 20u);              // from the DMA read, not the register read
+}
+
 TEST_CASE("an interrupt is not a crossing") {
     // Two interrupts with no access between them are both measured from the
     // access before: that is where replay delivers each of them.

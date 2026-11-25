@@ -52,11 +52,18 @@ struct HalOps {
     // consumes the matching event from the trace. Real hardware has nothing
     // to do.
     void (*site)(void* ctx, u32 id);
+    // Optional (may be null): fill `dst` with `len` bytes (1..kMaxDmaChunk)
+    // read from DMA region `region` at `offset`. On a part this is a copy out
+    // of RAM that a DMA controller writes; in the simulator, out of its model
+    // of that RAM; in replay, out of the trace. Never called with more than
+    // kMaxDmaChunk bytes: hal_dma_read() splits longer reads.
+    void (*dma_read)(void* ctx, u32 region, u32 offset, u8* dst, u32 len);
 
     // Everything starts null, so a backend that does not know about a hook
     // added later -- site was the first -- simply does not provide it, instead
     // of leaving an uninitialised pointer for the shim to call.
-    HalOps() : read32(0), write32(0), now(0), poll_irq(0), ctx(0), site(0) {}
+    HalOps() : read32(0), write32(0), now(0), poll_irq(0), ctx(0), site(0),
+               dma_read(0) {}
 };
 
 enum Mode {
@@ -137,6 +144,29 @@ void hal_run_isr(u32 vector);
 // vanish -- but a trace recorded with sites will not replay on a build without
 // them, which the replay reports as a divergence, as for any other mismatch.
 void hal_site(u32 id);
+
+// Reads memory that something other than the CPU writes -- a DMA buffer.
+//
+// A DMA controller deposits data at times nothing on a part can observe, so a
+// trace cannot record the deposit. It can record the moment the firmware looks:
+// that is an access like any other, and recording the bytes it saw there is
+// what makes the run replayable. So firmware reads DMA buffers through this,
+// the way it reads registers through mmio_read32, instead of dereferencing the
+// buffer:
+//
+//     const u32 count = mmio_read32(DMA_COUNT);   // how many bytes have landed
+//     u8 buf[8];
+//     hal_dma_read(RX_REGION, tail, buf, 8);      // and the bytes themselves
+//
+// `region` names the buffer. The firmware registers the same ids on the device
+// (HardwareHal::add_dma_region) and on the host, because a device address means
+// nothing on the host. A read longer than kMaxDmaChunk is split into several
+// events, identically on record and replay, and an interrupt may be delivered
+// between the pieces, as it may after any access. Each piece is a crossing, so
+// there is nothing to locate: the trace says exactly what the firmware saw.
+//
+// With no backend, or one without DMA, the bytes read are zero.
+void hal_dma_read(u32 region, u32 offset, void* dst, u32 len);
 
 // Instrumentation only. Under MODE_REPLAY this reports the timestamp of the
 // last consumed event, which tracks the recorded clock at every MMIO access

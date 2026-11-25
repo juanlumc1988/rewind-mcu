@@ -210,6 +210,38 @@ bool TraceWriter::site(u64 ts, u32 site) {
     return write_plain((u8)EV_SITE, ts, &site, 0);
 }
 
+bool TraceWriter::dma(u64 ts, u32 region, u32 offset, const u8* data, u32 len) {
+    if (!ok_ || !started_ || finished_) {
+        return false;
+    }
+    if (data == 0 || len == 0 || len > kMaxDmaChunk) {
+        fail("dma chunk empty or longer than kMaxDmaChunk");
+        return false;
+    }
+    if (ts < last_ts_) {
+        fail("non-monotonic timestamp");
+        return false;
+    }
+
+    u8  scratch[kMaxEventBytes];
+    u32 n = 0;
+    scratch[n++] = (u8)EV_DMA;
+    n += varint_encode(ts - last_ts_, scratch + n);
+    n += varint_encode((u64)region, scratch + n);
+    n += varint_encode((u64)offset, scratch + n);
+    scratch[n++] = (u8)len;
+    for (u32 i = 0; i < len; ++i) {
+        scratch[n++] = data[i];
+    }
+
+    if (!stage(scratch, n)) {
+        return false;
+    }
+    last_ts_ = ts;
+    // last_addr_ is untouched: this is not a peripheral register access.
+    return true;
+}
+
 bool TraceWriter::finish(u64 ts) {
     if (!started_ || finished_) {
         return false;

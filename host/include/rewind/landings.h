@@ -39,11 +39,12 @@ struct Landing {
     bool        has_pc;           // recorded as EV_IRQ_AT
     u32         pc;               // the instruction it landed in front of
 
-    // The last crossing before it in trace order: a read, a write or a site.
+    // The last crossing before it in trace order: a register read or write, a
+    // DMA read or a site.
     bool        has_crossing;
     std::size_t crossing_event;
     u8          crossing_type;
-    u32         crossing_addr;    // the address, or the site label
+    u32         crossing_addr;    // the address, the DMA region, or the site label
 
     // Cycles from that crossing to the interrupt, or from the start of the
     // trace when there is none.

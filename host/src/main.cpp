@@ -45,7 +45,9 @@ int usage() {
         "                fixed subtracts it under a critical section;\n"
         "                unguarded subtracts it without one -- a race that\n"
         "                lives entirely in computation, which only the probe\n"
-        "                point inside its window lets the simulator hit\n"
+        "                point inside its window lets the simulator hit;\n"
+        "                dma receives through a DMA ring instead of an\n"
+        "                interrupt, reading it through the shim\n"
         "  --tx N        bytes the UART delivers over the run (default 24)\n"
         "  --iters N     main-loop iterations (default 6000). Must match the\n"
         "                recording when replaying.\n"
@@ -125,6 +127,7 @@ const char* variant_name(fw::Variant variant) {
     switch (variant) {
         case fw::kFixed:     return "fixed";
         case fw::kUnguarded: return "unguarded";
+        case fw::kDma:       return "dma";
         default:             return "buggy";
     }
 }
@@ -136,6 +139,7 @@ const char* event_name(rwd::u8 type) {
         case rwd::EV_IRQ_ENTER:
         case rwd::EV_IRQ_AT:     return "irq  ";
         case rwd::EV_SITE:       return "site ";
+        case rwd::EV_DMA:        return "dma  ";
         case rwd::EV_STOP:       return "stop ";
         default:                    return "?    ";
     }
@@ -234,6 +238,8 @@ Args parse(int argc, char** argv, int first) {
                 a.variant = fw::kBuggy;
             } else if (v == "unguarded") {
                 a.variant = fw::kUnguarded;
+            } else if (v == "dma") {
+                a.variant = fw::kDma;
             } else {
                 std::fprintf(stderr, "rewind: unknown variant '%s'\n", v.c_str());
                 a.bad = true;
@@ -564,6 +570,14 @@ int cmd_dump(const Args& a) {
         } else if (ev.type == rwd::EV_SITE) {
             std::printf("%10llu  %-5s  id %u\n",
                         (unsigned long long)ev.ts, event_name(ev.type), ev.addr);
+        } else if (ev.type == rwd::EV_DMA) {
+            std::printf("%10llu  %-5s  region %u +%-4u len %-2u  ",
+                        (unsigned long long)ev.ts, event_name(ev.type), ev.addr,
+                        ev.value, (unsigned)ev.len);
+            for (u32 i = 0; i < (u32)ev.len; ++i) {
+                std::printf("%02X", (unsigned)ev.data[i]);
+            }
+            std::printf("\n");
         } else if (ev.type == rwd::EV_STOP) {
             std::printf("%10llu  %-5s\n", (unsigned long long)ev.ts, event_name(ev.type));
         } else {
@@ -732,6 +746,8 @@ int cmd_landings(const Args& a) {
             std::snprintf(after, sizeof(after), "(start of the trace)");
         } else if (l.crossing_type == rwd::EV_SITE) {
             std::snprintf(after, sizeof(after), "site %u", l.crossing_addr);
+        } else if (l.crossing_type == rwd::EV_DMA) {
+            std::snprintf(after, sizeof(after), "dma read, region %u", l.crossing_addr);
         } else {
             std::snprintf(after, sizeof(after), "%s 0x%08X %s",
                           l.crossing_type == rwd::EV_MMIO_READ ? "read" : "write",
