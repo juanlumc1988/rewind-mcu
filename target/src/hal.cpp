@@ -13,8 +13,10 @@ const HalOps* g_ops        = 0;
 TraceWriter*  g_writer     = 0;
 Mode          g_mode       = MODE_OFF;
 IsrFn         g_isr[kMaxIrqVectors];
+u8            g_prio[kMaxIrqVectors];
 u32           g_mask_depth = 0;
-bool          g_in_isr     = false;
+u32           g_depth      = 0;            // handlers running, nested
+u32           g_level      = kThreadLevel; // urgency of the innermost one
 const char*   g_divergence = 0;
 
 // Drains pending interrupts. Called after every MMIO access, because that is
@@ -23,31 +25,43 @@ const char*   g_divergence = 0;
 // peripheral access. Coarser than hardware, and enough to catch the entire
 // class of bugs where an ISR lands inside a read-modify-write on state it
 // shares with the main loop.
+//
+// A handler's own accesses come back through here. With a backend that models
+// priorities, one more urgent than the handler running may be taken then, and
+// runs to the end before the interrupted handler goes on: the recursion is as
+// deep as there are priority levels, which is at most kMaxIrqVectors. With one
+// that does not, a handler is never interrupted, as before.
 void pump_irqs() {
-    if (g_ops == 0 || g_ops->poll_irq == 0) {
+    if (g_ops == 0 || (g_ops->poll_irq == 0 && g_ops->poll_irq_pri == 0)) {
         return;
     }
-    // Masked, or already inside a handler. Real hardware would nest by
-    // priority; we keep handlers non-reentrant, which is the common
-    // configuration and avoids modelling a priority scheme we do not have.
-    if (g_mask_depth > 0 || g_in_isr) {
+    if (g_mask_depth > 0) {
+        return;
+    }
+    const bool nests = g_ops->poll_irq_pri != 0;
+    if (!nests && g_depth > 0) {
         return;
     }
 
-    g_in_isr = true;
     for (;;) {
-        const u32 vector = g_ops->poll_irq(g_ops->ctx);
+        const u32 vector = nests ? g_ops->poll_irq_pri(g_ops->ctx, g_prio, g_level)
+                                 : g_ops->poll_irq(g_ops->ctx);
         if (vector == kNoIrq) {
             break;
         }
         if (g_mode == MODE_RECORD && g_writer != 0) {
             g_writer->irq_enter(g_ops->now(g_ops->ctx), vector);
         }
+
+        const u32 outer = g_level;
+        g_level = vector < kMaxIrqVectors ? (u32)g_prio[vector] : 0u;
+        ++g_depth;
         if (vector < kMaxIrqVectors && g_isr[vector] != 0) {
             g_isr[vector]();
         }
+        --g_depth;
+        g_level = outer;
     }
-    g_in_isr = false;
 }
 
 } // namespace
@@ -57,10 +71,12 @@ void hal_reset() {
     g_writer     = 0;
     g_mode       = MODE_OFF;
     g_mask_depth = 0;
-    g_in_isr     = false;
+    g_depth      = 0;
+    g_level      = kThreadLevel;
     g_divergence = 0;
     for (u32 i = 0; i < kMaxIrqVectors; ++i) {
-        g_isr[i] = 0;
+        g_isr[i]  = 0;
+        g_prio[i] = 0;
     }
 }
 
@@ -72,6 +88,20 @@ void hal_set_isr(u32 vector, IsrFn fn) {
     if (vector < kMaxIrqVectors) {
         g_isr[vector] = fn;
     }
+}
+
+void hal_set_irq_priority(u32 vector, u32 priority) {
+    if (vector < kMaxIrqVectors) {
+        g_prio[vector] = (u8)(priority > kMaxPriority ? kMaxPriority : priority);
+    }
+}
+
+u32 hal_irq_level() {
+    return g_level;
+}
+
+u32 hal_irq_depth() {
+    return g_depth;
 }
 
 void hal_mode_off() {

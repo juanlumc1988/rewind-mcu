@@ -105,6 +105,7 @@ private:
     u32  read32(u32 addr);
     void write32(u32 addr, u32 value);
     u32  poll_irq();
+    u32  poll_irq_pri(const u8* priority, u32 level);
     void site(u32 id);
     void dma_read(u32 region, u32 offset, u8* dst, u32 len);
     void diverge(const char* fmt, ...);
@@ -114,6 +115,7 @@ private:
     static void s_write32(void* ctx, u32 addr, u32 value);
     static u64  s_now(void* ctx);
     static u32  s_poll_irq(void* ctx);
+    static u32  s_poll_irq_pri(void* ctx, const u8* priority, u32 level);
     static void s_site(void* ctx, u32 id);
     static void s_dma_read(void* ctx, u32 region, u32 offset, u8* dst, u32 len);
 

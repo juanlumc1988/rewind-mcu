@@ -212,10 +212,46 @@ is invisible to this model unless a probe point is placed in the window (see
 *Probe points* below). Making every basic block a crossing would need
 instrumentation that costs far more than 2% and is a different project.
 
-Handlers are non-reentrant: while one is running, the shim dispatches no
-others. Real hardware nests by priority. Modelling that needs a priority
-scheme this does not have, and non-reentrant handlers are the common
-configuration anyway.
+## Nested interrupts
+
+Real hardware nests by priority: a handler can be interrupted by one that is
+more urgent, which runs to the end before the first goes on. The shim does the
+same, Cortex-M style -- a smaller number is more urgent, and an interrupt only
+preempts a handler if it is *strictly* more urgent -- when two things are true:
+
+- the firmware gave its vectors priorities with `hal_set_irq_priority(vector,
+  priority)`. Every vector starts at 0, so by default nothing preempts anything
+  and a handler is never interrupted, exactly as before;
+- the backend provides `HalOps::poll_irq_pri`, which is `poll_irq` that is told
+  how urgent the running handler is and returns only a pending vector more
+  urgent than that, leaving the rest pending. The simulator and replay do; a
+  backend that does not is served as before, with its priorities ignored.
+
+A handler's own register accesses come back through the shim like any other,
+and that is where a more urgent interrupt is taken: inside the handler, between
+two of its accesses. Recursion is as deep as there are priority levels. The
+trace needs nothing new -- an `EV_IRQ_ENTER` that lands between two accesses of
+a handler is the nesting, and nothing else says it.
+
+Replay has to nest the same way, and it can only if the firmware sets the same
+priorities. The trace says which interrupt came next; the shim says how urgent
+the running handler is; if the next one is not more urgent, it did not preempt
+in the recording and does not now, and waits for the handler to return, when the
+shim asks again from outside it. If the priorities differ from the recording's
+the handler's next access finds the interrupt where it expected a register read,
+and replay reports a divergence (`tests/test_nested.cpp` replays a recorded
+nesting with the priorities the wrong way round and checks that it is noticed).
+
+On a part the NVIC decides, and the shim sees none of it. The firmware should
+still call `hal_set_irq_priority` with the numbers it programs into the NVIC, so
+that a trace from the part replays with the same nesting. Masking
+(`hal_irq_disable`) holds back every interrupt, preempting or not, as PRIMASK
+does; BASEPRI-style partial masking is not modelled.
+
+The simulator has a second interrupt source for this, a timer
+(`Mcu::enable_timer`, vector `kIrqTimer`) that raises a pending flag every
+`period` cycles: one flag, not a count, so a timer the firmware is too slow for
+is coalesced as it would be on a part.
 
 ## Critical sections
 

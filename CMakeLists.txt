@@ -141,6 +141,7 @@ if(REWIND_BUILD_TESTS)
         tests/test_landings.cpp
         tests/test_locate.cpp
         tests/test_dma.cpp
+        tests/test_nested.cpp
         tests/test_tracediff.cpp
         tests/test_view.cpp
         tests/test_version.cpp

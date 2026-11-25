@@ -45,6 +45,7 @@ const u32 kSrRxne = 0x1u;   // receive register not empty
 const u32 kSrTxe  = 0x2u;   // transmit register empty (always set here)
 
 const u32 kIrqUartRx = 1u;
+const u32 kIrqTimer  = 2u;    // only after enable_timer()
 
 // -- timing --
 
@@ -108,12 +109,23 @@ public:
     void enable_dma() { dma_ = true; }
     u32  dma_deposited() const { return dma_count_; }
 
+    // A second interrupt source, to give the first something to nest with: a
+    // timer that raises kIrqTimer every `period` cycles (from the first one
+    // onwards), whether or not the firmware has dealt with the last -- like a
+    // pending bit, it is one flag, not a count. Call before the run starts.
+    void enable_timer(u32 period) {
+        timer_period_ = period;
+        next_timer_   = period;
+    }
+    u32  timer_fired() const { return timer_fired_; }
+
 private:
     u64  next_random();
     void advance(u32 dt);
     u32  read32(u32 addr);
     void write32(u32 addr, u32 value);
     u32  poll_irq();
+    u32  poll_irq_pri(const u8* priority, u32 level);
     void site(u32 id);
     void dma_read(u32 region, u32 offset, u8* dst, u32 len);
 
@@ -122,6 +134,7 @@ private:
     static void s_write32(void* ctx, u32 addr, u32 value);
     static u64  s_now(void* ctx);
     static u32  s_poll_irq(void* ctx);
+    static u32  s_poll_irq_pri(void* ctx, const u8* priority, u32 level);
     static void s_site(void* ctx, u32 id);
     static void s_dma_read(void* ctx, u32 region, u32 offset, u8* dst, u32 len);
 
@@ -143,6 +156,10 @@ private:
     bool dma_;
     u32  dma_count_;
     u8   dma_ring_[kDmaRingSize];
+    u32  timer_period_;   // 0: no timer
+    u64  next_timer_;
+    bool timer_latched_;
+    u32  timer_fired_;
 };
 
 } // namespace sim
