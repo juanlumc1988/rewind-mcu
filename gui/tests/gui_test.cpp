@@ -24,6 +24,7 @@
 
 #include "eventmodel.h"
 #include "mainwindow.h"
+#include "support/blinker.h"
 #include "rewind/lanes.h"
 #include "rewind/session.h"
 #include "rewind/tracediff.h"
@@ -74,6 +75,8 @@ private Q_SLOTS:
     void theEventListDrivesTheCursor();
     void aTraceThatCannotBeReadIsRefused();
     void aTraceWithoutFirmwareHasNoState();
+    void aFirmwareThatIsNotTheExampleIsShownThroughItsFactory();
+    void aTraceThatBeganMidRunStartsFromItsImage();
     void theWindowIsNotBlank();
 };
 
@@ -372,7 +375,8 @@ void GuiTest::twoTracesAreCompared() {
     QCOMPARE(cellText(w.statePanel(), consumed, 1), QString::number(sb.fw.consumed));
     QVERIFY(w.statePanel()->differingRows() > 0);
 
-    // A row is flagged exactly when its two numbers differ.
+    // A row is flagged exactly when its two numbers differ. The last row is the
+    // state's hash: tinted when it differs, and not counted as a variable.
     const QTableWidget* sp = w.statePanel();
     int flagged = 0;
     for (int r = 0; r < sp->rowCount(); ++r) {
@@ -380,8 +384,13 @@ void GuiTest::twoTracesAreCompared() {
         const bool hot = sp->item(r, 0)->background().style() != Qt::NoBrush;
         QCOMPARE(hot, differs);
         QCOMPARE(sp->item(r, 1)->background().style() != Qt::NoBrush, differs);
-        flagged += differs ? 1 : 0;
+        if (r + 1 < sp->rowCount()) {
+            flagged += differs ? 1 : 0;
+        }
     }
+    QCOMPARE(sp->verticalHeaderItem(sp->rowCount() - 1)->text(), QStringLiteral("state hash"));
+    QCOMPARE(cellText(sp, sp->rowCount() - 1, 0),
+             QStringLiteral("%1").arg((qulonglong)sa.state_hash, 16, 16, QLatin1Char('0')));
     QCOMPARE(flagged, w.statePanel()->differingRows());
 
     QVERIFY(w.summary().contains(QStringLiteral("agree for 2088 events")));
@@ -539,8 +548,84 @@ void GuiTest::aTraceWithoutFirmwareHasNoState() {
     QVERIFY(!w.doc(MainWindow::kSideA)->has_firmware());
     w.setCursor(MainWindow::kSideA, 1000);
     QCOMPARE(w.cursor(MainWindow::kSideA), (std::size_t)1000);      // the events are still there
-    QCOMPARE(cellText(w.statePanel(), 0, 0), QStringLiteral("-"));  // the variables are not
+    QCOMPARE(w.statePanel()->rowCount(), 1);                        // the variables are not:
+    QCOMPARE(cellText(w.statePanel(), 0, 0), QStringLiteral("-"));  // only an empty hash row
     QCOMPARE(w.statePanel()->differingRows(), 0);
+}
+
+void GuiTest::aFirmwareThatIsNotTheExampleIsShownThroughItsFactory() {
+    const rwhost::FirmwareRecording a = blinker::record(5);
+    const rwhost::FirmwareRecording b = blinker::record(9);
+    QVERIFY(a.writer_ok && b.writer_ok);
+
+    // Without the factory the window does not know this build: events, no state.
+    {
+        MainWindow plain;
+        plain.setMainIters(blinker::kIters);
+        QString err;
+        QVERIFY2(plain.openBytes(MainWindow::kSideA, a.trace, QStringLiteral("a.rwd"), &err),
+                 qPrintable(err));
+        QVERIFY(!plain.doc(MainWindow::kSideA)->has_firmware());
+        QCOMPARE(plain.statePanel()->rowCount(), 1);
+    }
+
+    MainWindow w;
+    w.setMainIters(blinker::kIters);
+    w.setFirmwareFactory(&blinker::factory);
+    QString err;
+    QVERIFY2(w.openBytes(MainWindow::kSideA, a.trace, QStringLiteral("a.rwd"), &err), qPrintable(err));
+    QVERIFY2(w.openBytes(MainWindow::kSideB, b.trace, QStringLiteral("b.rwd"), &err), qPrintable(err));
+    QVERIFY(w.doc(MainWindow::kSideA)->has_firmware());
+    QCOMPARE(QString::fromLatin1(w.doc(MainWindow::kSideA)->variant_name()), QStringLiteral("blinker"));
+
+    const std::size_t last = w.doc(MainWindow::kSideA)->events().size() - 1;
+    w.setCursor(MainWindow::kSideA, last);
+    rwhost::Snapshot sa;
+    QVERIFY(w.doc(MainWindow::kSideA)->snapshot_at(w.cursor(MainWindow::kSideA), &sa));
+
+    // The firmware's own fields, with the array elements gathered into one row
+    // and the hash as the last.
+    const StatePanel* sp = w.statePanel();
+    const int presses = sp->rowOf(QStringLiteral("presses"));
+    const int history = sp->rowOf(QStringLiteral("history"));
+    QVERIFY(presses >= 0);
+    QVERIFY(history >= 0);
+    QCOMPARE(sp->rowOf(QStringLiteral("history[0]")), -1);
+    QCOMPARE(cellText(sp, presses, 0), QString::number(blinker::decode(sa).presses));
+    QCOMPARE(cellText(sp, history, 0).split(QLatin1Char(' ')).size(), 4);
+    QCOMPARE(sp->verticalHeaderItem(sp->rowCount() - 1)->text(), QStringLiteral("state hash"));
+
+    // Another seed, so another run: some variable differs, and is tinted.
+    QVERIFY(sp->differingRows() > 0);
+    QVERIFY(w.summary().contains(QStringLiteral("then differ")));
+}
+
+void GuiTest::aTraceThatBeganMidRunStartsFromItsImage() {
+    rwhost::RunConfig cfg;
+    cfg.seed       = 4;
+    cfg.skip_iters = 2500;
+    cfg.main_iters = 1000;
+    const rwhost::RecordResult part = rwhost::record_run(cfg);
+    QVERIFY(part.writer_ok);
+    cfg.skip_iters = 0;
+    cfg.main_iters = 2500;
+    const rwhost::RecordResult upto = rwhost::record_run(cfg);
+
+    MainWindow w;
+    w.setMainIters(1000);
+    QString err;
+    QVERIFY2(w.openBytes(MainWindow::kSideA, part.trace, QStringLiteral("mid.rwd"), &err), qPrintable(err));
+    w.show();
+
+    // The list begins with the image, and the state at the start is the one the
+    // firmware had when recording began -- not a firmware at power-on.
+    const QAbstractItemModel* m = w.table(MainWindow::kSideA)->model();
+    QVERIFY(m->data(m->index(0, EventModel::kColEvent)).toString().startsWith(QStringLiteral("ram region 0")));
+    w.setCursor(MainWindow::kSideA, 0);
+    const int consumed = w.statePanel()->rowOf(QStringLiteral("consumed"));
+    QVERIFY(consumed >= 0);
+    QCOMPARE(cellText(w.statePanel(), consumed, 0), QString::number(upto.fw.consumed));
+    QVERIFY(upto.fw.consumed > 0u);
 }
 
 void GuiTest::theWindowIsNotBlank() {

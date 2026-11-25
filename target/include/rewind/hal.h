@@ -34,6 +34,13 @@ namespace rwd {
 const u32 kNoIrq         = 0xFFFFFFFFu;
 const u32 kMaxIrqVectors = 8;
 
+// Interrupt priorities, Cortex-M style: a smaller number is more urgent, and an
+// interrupt preempts a running handler only if it is strictly more urgent. Every
+// vector starts at 0, so by default nothing preempts anything. The level of
+// "no handler is running" is kThreadLevel, less urgent than any priority.
+const u32 kThreadLevel   = 255;
+const u32 kMaxPriority   = 254;
+
 typedef void (*IsrFn)();
 
 // The backend behind the shim: real MMIO on the target, a simulator on the
@@ -58,12 +65,20 @@ struct HalOps {
     // of that RAM; in replay, out of the trace. Never called with more than
     // kMaxDmaChunk bytes: hal_dma_read() splits longer reads.
     void (*dma_read)(void* ctx, u32 region, u32 offset, u8* dst, u32 len);
+    // Optional (may be null): poll_irq for a backend that models priorities.
+    // Returns the most urgent pending vector v with priority[v] < level, and
+    // takes it off the pending set; vectors that are not that urgent stay
+    // pending, to be returned when the handler in the way has finished. Ties
+    // go to the lower vector, as on a Cortex-M. `priority` has kMaxIrqVectors
+    // entries. With this the shim lets a handler be preempted; without it,
+    // poll_irq is called only outside handlers and nothing nests.
+    u32  (*poll_irq_pri)(void* ctx, const u8* priority, u32 level);
 
     // Everything starts null, so a backend that does not know about a hook
     // added later -- site was the first -- simply does not provide it, instead
     // of leaving an uninitialised pointer for the shim to call.
     HalOps() : read32(0), write32(0), now(0), poll_irq(0), ctx(0), site(0),
-               dma_read(0) {}
+               dma_read(0), poll_irq_pri(0) {}
 };
 
 enum Mode {
@@ -79,6 +94,18 @@ void hal_reset();
 
 void hal_attach(const HalOps* ops);   // `ops` must outlive the attachment
 void hal_set_isr(u32 vector, IsrFn fn);
+
+// Sets how urgent `vector` is (0 is the most urgent; kMaxPriority the least,
+// and larger values are taken as that). Needed on the device and on the host
+// alike: on hardware the NVIC's own priority registers decide, and the shim
+// only needs the same numbers so that a replay nests what the recording did.
+// Priorities take effect with a backend that provides poll_irq_pri.
+void hal_set_irq_priority(u32 vector, u32 priority);
+
+// How urgent the running handler is: kThreadLevel when none is, otherwise its
+// vector's priority. And how many are running, nested.
+u32  hal_irq_level();
+u32  hal_irq_depth();
 
 void hal_mode_off();
 void hal_mode_record(TraceWriter* writer);
@@ -167,6 +194,42 @@ void hal_site(u32 id);
 //
 // With no backend, or one without DMA, the bytes read are zero.
 void hal_dma_read(u32 region, u32 offset, void* dst, u32 len);
+
+// A recording that does not start at reset.
+//
+// Replay re-executes the firmware, which is only faithful from the state the
+// recording began in. From reset that is given; from the middle of a run -- the
+// last stretch before a failure, with the lead-up not worth keeping -- it is
+// whatever the firmware had built up. So the firmware says which parts of its
+// RAM are its state, and the recorder writes their contents into the trace
+// before the first event (EV_RAM), where replay finds them and puts them back.
+//
+//     hal_state_region(0, &g_state, sizeof(g_state));   // once, at start-up
+//     ...                                               // the firmware runs
+//     recorder.start();                                 // recording begins
+//     hal_snapshot();                                   // here, at a quiet point
+//
+// The ids are the firmware's own and must be the ones its host build gives to
+// Firmware::restore_region, because a device address means nothing on the host.
+// Call hal_snapshot() where the state is whole -- between iterations of the main
+// loop, not inside an interrupt handler or a critical section -- and with
+// recording on and nothing recorded yet.
+//
+// What is in a region is the firmware's to get right: a variable left out of
+// every region is one a replay will not have, and it will diverge from the
+// recording for reasons that look like a firmware bug. The image costs the size
+// of the regions plus about five bytes per sixteen, once. Large state is not
+// what this is for.
+const u32 kMaxStateRegions = 4;
+
+// Declares `size` bytes at `base` as (part of) the firmware's state, as region
+// `id`. False for a null base, an empty region, a repeated id or no room.
+bool hal_state_region(u32 id, const void* base, u32 size);
+
+// Writes the registered regions into the trace as EV_RAM events. False if not
+// recording, nothing is registered, or the trace refuses them (including: an
+// event has been recorded already).
+bool hal_snapshot();
 
 // Instrumentation only. Under MODE_REPLAY this reports the timestamp of the
 // last consumed event, which tracks the recorded clock at every MMIO access

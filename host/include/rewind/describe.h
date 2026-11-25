@@ -18,8 +18,11 @@ using rwd::u32;
 // The example firmware's register map, by address; "" for anything else.
 const char* register_name(u32 addr);
 
-// "read", "write", "irq", "site", "dma", "stop"; "?" for a type this does not know.
+// "read", "write", "irq", "site", "dma", "ram", "stop"; "?" for a type this does not know.
 const char* event_kind(u8 type);
+
+// The simulator's name for an interrupt vector; "" for any other.
+const char* irq_name(u32 vector);
 
 // One line, without the cycle count: "read 0x40000000 SYSTICK.CNT -> 0x00000006".
 std::string describe_event(const rwd::Event& e);

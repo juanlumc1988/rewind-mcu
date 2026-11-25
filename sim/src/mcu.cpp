@@ -18,7 +18,11 @@ Mcu::Mcu(u64 seed, u32 tx_total)
       rx_pending_(false),
       irq_latched_(false),
       dma_(false),
-      dma_count_(0) {
+      dma_count_(0),
+      timer_period_(0),
+      next_timer_(0),
+      timer_latched_(false),
+      timer_fired_(0) {
     for (u32 i = 0; i < kDmaRingSize; ++i) {
         dma_ring_[i] = 0;
     }
@@ -29,6 +33,7 @@ Mcu::Mcu(u64 seed, u32 tx_total)
     ops_.ctx      = this;
     ops_.site     = &Mcu::s_site;
     ops_.dma_read = &Mcu::s_dma_read;
+    ops_.poll_irq_pri = &Mcu::s_poll_irq_pri;
 
     // Warm the generator so nearby seeds diverge immediately instead of
     // producing correlated first arrivals.
@@ -48,6 +53,13 @@ u64 Mcu::next_random() {
 
 void Mcu::advance(u32 dt) {
     cycles_ += (u64)dt;
+
+    if (timer_period_ != 0 && cycles_ >= next_timer_) {
+        timer_latched_ = true;
+        ++timer_fired_;
+        // On the period's own grid, skipping any the firmware was too slow to see.
+        next_timer_ += (u64)timer_period_ * (1u + (cycles_ - next_timer_) / (u64)timer_period_);
+    }
 
     // A new byte only arrives once the previous one has been read, so the
     // model has no overrun case. Real UARTs do; modelling that here would
@@ -137,13 +149,39 @@ u32 Mcu::poll_irq() {
         irq_latched_ = false;
         return kIrqUartRx;
     }
+    if (timer_latched_) {
+        timer_latched_ = false;
+        return kIrqTimer;
+    }
     return rwd::kNoIrq;
+}
+
+// The pending vector that is more urgent than `level`, most urgent first and
+// the lower vector number among equals; the others stay pending.
+u32 Mcu::poll_irq_pri(const u8* priority, u32 level) {
+    u32 best = rwd::kNoIrq;
+    if (irq_latched_ && (u32)priority[kIrqUartRx] < level) {
+        best = kIrqUartRx;
+    }
+    if (timer_latched_ && (u32)priority[kIrqTimer] < level &&
+        (best == rwd::kNoIrq || priority[kIrqTimer] < priority[best])) {
+        best = kIrqTimer;
+    }
+    if (best == kIrqUartRx) {
+        irq_latched_ = false;
+    } else if (best == kIrqTimer) {
+        timer_latched_ = false;
+    }
+    return best;
 }
 
 u32  Mcu::s_read32(void* ctx, u32 addr) { return static_cast<Mcu*>(ctx)->read32(addr); }
 void Mcu::s_write32(void* ctx, u32 addr, u32 v) { static_cast<Mcu*>(ctx)->write32(addr, v); }
 u64  Mcu::s_now(void* ctx) { return static_cast<Mcu*>(ctx)->cycles_; }
 u32  Mcu::s_poll_irq(void* ctx) { return static_cast<Mcu*>(ctx)->poll_irq(); }
+u32  Mcu::s_poll_irq_pri(void* ctx, const u8* priority, u32 level) {
+    return static_cast<Mcu*>(ctx)->poll_irq_pri(priority, level);
+}
 void Mcu::s_site(void* ctx, u32 id) { static_cast<Mcu*>(ctx)->site(id); }
 void Mcu::s_dma_read(void* ctx, u32 region, u32 offset, u8* dst, u32 len) {
     static_cast<Mcu*>(ctx)->dma_read(region, offset, dst, len);

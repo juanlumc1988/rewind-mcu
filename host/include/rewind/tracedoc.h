@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "rewind/example_firmware.h"
+#include "rewind/firmware.h"
 #include "rewind/session.h"
 #include "rewind/timeline.h"
 
@@ -25,6 +27,12 @@ namespace rwhost {
 class TraceDoc {
 public:
     TraceDoc();
+
+    // How a trace's build id becomes the firmware that can replay it. The
+    // example firmware's builds are known by default; a tool for another
+    // firmware gives its own, before open(). Return null for an id it does not
+    // know: the trace is then readable, but has no state to show.
+    void set_firmware_factory(FirmwareFactory factory);
 
     // Decodes the trace. False if it cannot be read; error() says why. A trace
     // that is damaged part-way is refused, not shown in part.
@@ -38,9 +46,12 @@ public:
     // Cycle count of the last event: how long the run lasted.
     u64 duration() const { return events_.empty() ? 0 : events_.back().ts; }
 
-    // Whether the header names a firmware build this can run, and which.
-    bool has_firmware() const { return has_firmware_; }
-    fw::Variant variant() const { return variant_; }
+    // Whether the header names a firmware build this can run, and which. For
+    // the example firmware, variant() says which of its four; for any other it
+    // is meaningless, and variant_name() is the firmware's own name.
+    bool has_firmware() const { return firmware_ != nullptr; }
+    const Firmware* firmware() const { return firmware_.get(); }
+    fw::Variant variant() const;
     const char* variant_name() const;
 
     // The firmware's state just before event `index` is served: 0 is before the
@@ -54,8 +65,8 @@ private:
     std::vector<u8>          bytes_;
     rwd::TraceHeader         header_;
     std::vector<rwd::Event>  events_;
-    bool                     has_firmware_;
-    fw::Variant              variant_;
+    FirmwareFactory          factory_;
+    std::unique_ptr<Firmware> firmware_;   // null: no firmware knows this build
     u32                      main_iters_;
     std::string              error_;
     std::unique_ptr<Timeline> timeline_;   // built the first time it is needed

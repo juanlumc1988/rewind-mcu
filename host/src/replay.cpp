@@ -24,6 +24,7 @@ const char* event_name(u8 type) {
         case rwd::EV_IRQ_AT:     return "IRQ_AT";
         case rwd::EV_SITE:       return "SITE";
         case rwd::EV_DMA:        return "DMA";
+        case rwd::EV_RAM:        return "RAM";
         case rwd::EV_STOP:       return "STOP";
         default:                    return "?";
     }
@@ -33,7 +34,7 @@ const char* event_name(u8 type) {
 
 ReplayHal::ReplayHal()
     : cursor_(0), now_(0), divergence_cursor_(0), sites_recorded_(true),
-      probe_count_(0),
+      first_event_(0), start_now_(0), probe_count_(0),
       capture_at_(0), capture_fn_(0), capture_ctx_(0),
       captured_(false), events_served_(0), check_writes_(false) {
     ops_.read32   = &ReplayHal::s_read32;
@@ -43,6 +44,7 @@ ReplayHal::ReplayHal()
     ops_.ctx      = this;
     ops_.site     = &ReplayHal::s_site;
     ops_.dma_read = &ReplayHal::s_dma_read;
+    ops_.poll_irq_pri = &ReplayHal::s_poll_irq_pri;
 
     header_.magic    = 0;
     header_.version  = 0;
@@ -78,9 +80,32 @@ bool ReplayHal::load(const u8* data, std::size_t len) {
         return false;
     }
 
-    cursor_ = 0;
-    now_    = 0;
+    // The memory image, if there is one, comes first and is not served.
+    first_event_ = 0;
+    while (first_event_ < events_.size() && events_[first_event_].type == rwd::EV_RAM) {
+        ++first_event_;
+    }
+    start_now_ = first_event_ > 0 ? events_[first_event_ - 1].ts : 0;
+
+    cursor_ = first_event_;
+    now_    = start_now_;
     return true;
+}
+
+std::map<u32, std::vector<u8> > ReplayHal::image() const {
+    std::map<u32, std::vector<u8> > out;
+    for (std::size_t i = 0; i < first_event_; ++i) {
+        const rwd::Event& e = events_[i];
+        std::vector<u8>& region = out[e.addr];
+        const std::size_t end = (std::size_t)e.value + (std::size_t)e.len;
+        if (region.size() < end) {
+            region.resize(end, 0);
+        }
+        for (u32 k = 0; k < (u32)e.len; ++k) {
+            region[(std::size_t)e.value + k] = e.data[k];
+        }
+    }
+    return out;
 }
 
 void ReplayHal::set_capture_point(std::size_t index, CaptureFn fn, void* ctx) {
@@ -105,8 +130,8 @@ void ReplayHal::clear_landings() {
 }
 
 void ReplayHal::restart() {
-    cursor_      = 0;
-    now_         = 0;
+    cursor_      = first_event_;
+    now_         = start_now_;
     probe_count_ = 0;
     captured_    = false;
     divergence_cursor_ = 0;
@@ -251,6 +276,35 @@ u32 ReplayHal::poll_irq() {
     return ev.addr;   // vector number
 }
 
+// poll_irq for a firmware whose interrupts have priorities. The trace says
+// which interrupt came next and the shim says how urgent the running handler
+// is; if the next one is not more urgent, it did not preempt this handler in
+// the recording and will not now -- it comes after the handler returns, when
+// the shim asks again from outside it. Nothing is wrong with that, so it is not
+// a divergence; if the firmware really is not the recorded one, the accesses
+// that follow will say so.
+//
+// Asked from inside a handler this is not a capture point: poll_irq was never
+// asked there before priorities, and moving the instant a capture is taken to
+// a place it never was would change what a snapshot at an event means.
+u32 ReplayHal::poll_irq_pri(const u8* priority, u32 level) {
+    if (level == rwd::kThreadLevel) {
+        return poll_irq();
+    }
+    if (cursor_ >= events_.size()) {
+        return rwd::kNoIrq;
+    }
+    const rwd::Event& ev = events_[cursor_];
+    if (ev.type != rwd::EV_IRQ_ENTER && ev.type != rwd::EV_IRQ_AT) {
+        return rwd::kNoIrq;
+    }
+    const u32 urgency = ev.addr < rwd::kMaxIrqVectors ? (u32)priority[ev.addr] : 0u;
+    if (urgency >= level) {
+        return rwd::kNoIrq;
+    }
+    return poll_irq();
+}
+
 // A probe point is one more crossing, served in trace order like an access:
 // the recording crossed this label here, so the firmware must too. Anything
 // else -- no site in the trace, a different label, the trace already over --
@@ -342,6 +396,9 @@ u32  ReplayHal::s_read32(void* ctx, u32 addr) { return static_cast<ReplayHal*>(c
 void ReplayHal::s_write32(void* ctx, u32 a, u32 v) { static_cast<ReplayHal*>(ctx)->write32(a, v); }
 u64  ReplayHal::s_now(void* ctx) { return static_cast<ReplayHal*>(ctx)->now_; }
 u32  ReplayHal::s_poll_irq(void* ctx) { return static_cast<ReplayHal*>(ctx)->poll_irq(); }
+u32  ReplayHal::s_poll_irq_pri(void* ctx, const u8* priority, u32 level) {
+    return static_cast<ReplayHal*>(ctx)->poll_irq_pri(priority, level);
+}
 void ReplayHal::s_site(void* ctx, u32 id) { static_cast<ReplayHal*>(ctx)->site(id); }
 void ReplayHal::s_dma_read(void* ctx, u32 region, u32 offset, u8* dst, u32 len) {
     static_cast<ReplayHal*>(ctx)->dma_read(region, offset, dst, len);

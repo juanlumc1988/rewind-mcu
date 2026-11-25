@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "fw/rx_pump.h"
+#include "rewind/firmware.h"
 #include "rewind/trace.h"
 
 namespace rwhost {
@@ -96,7 +97,15 @@ struct StateDelta {
     u64         b;
 };
 
-// The fields that differ, in a fixed order; the ring one byte at a time.
+// The fields that differ between two firmware states described as named
+// numbers (Firmware::describe_state), in the order the first one lists them and
+// then any only the second has. A field one side does not have counts as zero
+// there.
+std::vector<StateDelta> diff_fields(const std::vector<StateField>& a,
+                                    const std::vector<StateField>& b);
+
+// The same for the example firmware's state: the fields that differ, in a
+// fixed order, the ring one byte at a time.
 std::vector<StateDelta> diff_state(const fw::State& a, const fw::State& b);
 
 } // namespace rwhost

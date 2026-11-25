@@ -47,7 +47,10 @@
 #include <string>
 #include <vector>
 
+#include <memory>
+
 #include "fw/rx_pump.h"
+#include "rewind/firmware.h"
 #include "rewind/replay.h"
 #include "rewind/session.h"
 
@@ -61,9 +64,16 @@ struct Snapshot {
     u64         state_hash  = 0;
     bool        valid = false;
 
-    // Value-initialised, so reading a snapshot that was never filled gives
-    // zeroes rather than whatever was on the stack. fw::State is a C++98
-    // aggregate with no constructor of its own.
+    // The state, as the firmware saved it (Firmware::save_state), and as named
+    // numbers (Firmware::describe_state) for showing and comparing.
+    std::vector<u8>         state;
+    std::vector<StateField> fields;
+
+    // The example firmware's state as the struct it is. Only filled when the
+    // firmware is the example (ExampleFirmware); for any other it stays zero,
+    // and `state` and `fields` are what there is. Value-initialised, so a
+    // snapshot that was never filled reads as zeroes, not as whatever was on
+    // the stack: fw::State is a C++98 aggregate with no constructor of its own.
     fw::State   fw = fw::State();
 };
 
@@ -74,8 +84,16 @@ public:
     // Loads a trace and builds the checkpoint index. `main_iters` must match
     // the recording, as for replay_run(). A smaller `checkpoint_every`
     // (measured in main-loop iterations) makes seeks faster and costs
-    // roughly sizeof(Snapshot) per checkpoint.
+    // roughly the size of the firmware's state per checkpoint.
+    //
+    // This overload replays the example firmware, as the trace's build id names
+    // it. For any other firmware, give it: `firmware` is not owned and must
+    // outlive the timeline. The caller has chosen it to match the trace (a
+    // build id check is the caller's, since only the caller knows which ids
+    // go with which firmware).
     bool open(const std::vector<u8>& trace, u32 main_iters,
+              u32 checkpoint_every = 128);
+    bool open(const std::vector<u8>& trace, Firmware* firmware, u32 main_iters,
               u32 checkpoint_every = 128);
 
     std::size_t event_count() const { return event_count_; }
@@ -117,14 +135,16 @@ public:
 
 private:
     struct Checkpoint {
-        u32         main_iter;
-        std::size_t cursor;
-        u64         ts;
-        fw::State   fw;
+        u32             main_iter;
+        std::size_t     cursor;
+        u64             ts;
+        std::vector<u8> state;
     };
 
-    // Puts the shim into replay mode with a given firmware state and cursor.
-    void install(const fw::State& state, std::size_t cursor, u64 ts);
+    // Puts the shim into replay mode with a given firmware state and cursor;
+    // with no state, the firmware as it is at power-on.
+    bool install(const std::vector<u8>* state, std::size_t cursor, u64 ts);
+    void fill(Snapshot* snap) const;
     const Checkpoint* nearest(std::size_t event_index) const;
     static void capture(void* ctx);
 
@@ -133,7 +153,8 @@ private:
 
     ReplayHal               replay_;
     std::vector<Checkpoint> checkpoints_;
-    fw::Variant             variant_;
+    std::unique_ptr<Firmware> owned_;      // when it made the firmware itself
+    Firmware*               firmware_;
     u32                     main_iters_;
     u32                     checkpoint_every_;
     std::size_t             event_count_;

@@ -75,6 +75,13 @@ public:
     // caller's to split.
     bool dma(u64 ts, u32 region, u32 offset, const u8* data, u32 len);
 
+    // Emits EV_RAM: `len` bytes (1..kMaxRamChunk) of the memory image at
+    // `offset` in state region `region`, as it was when recording began. Only
+    // before the first event of any other kind: an image that came after the
+    // run had started would not be an image of where it started. A larger
+    // region is the caller's to split.
+    bool ram(u64 ts, u32 region, u32 offset, const u8* data, u32 len);
+
     // Emits EV_STOP, flushes the pending block and writes the terminator.
     bool finish(u64 ts);
 
@@ -126,6 +133,7 @@ private:
     bool        ok_;
     bool        started_;
     bool        finished_;
+    bool        image_open_;   // no event but memory images so far
     const char* err_;
 };
 

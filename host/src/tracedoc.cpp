@@ -8,7 +8,7 @@
 namespace rwhost {
 
 TraceDoc::TraceDoc()
-    : has_firmware_(false), variant_(fw::kBuggy), main_iters_(0), timeline_failed_(false) {
+    : factory_(&make_example_firmware), main_iters_(0), timeline_failed_(false) {
     header_.magic    = 0;
     header_.version  = 0;
     header_.flags    = 0;
@@ -16,16 +16,17 @@ TraceDoc::TraceDoc()
     header_.seed     = 0;
 }
 
+void TraceDoc::set_firmware_factory(FirmwareFactory factory) {
+    factory_ = factory ? factory : FirmwareFactory(&make_example_firmware);
+}
+
+fw::Variant TraceDoc::variant() const {
+    const ExampleFirmware* example = dynamic_cast<const ExampleFirmware*>(firmware_.get());
+    return example != nullptr ? example->variant() : fw::kBuggy;
+}
+
 const char* TraceDoc::variant_name() const {
-    if (!has_firmware_) {
-        return "unknown";
-    }
-    switch (variant_) {
-        case fw::kFixed:     return "fixed";
-        case fw::kUnguarded: return "unguarded";
-        case fw::kDma:       return "dma";
-        default:             return "buggy";
-    }
+    return firmware_ ? firmware_->name() : "unknown";
 }
 
 bool TraceDoc::open(const std::vector<u8>& bytes, u32 main_iters) {
@@ -33,7 +34,7 @@ bool TraceDoc::open(const std::vector<u8>& bytes, u32 main_iters) {
     events_.clear();
     timeline_.reset();
     timeline_failed_ = false;
-    has_firmware_    = false;
+    firmware_.reset();
     main_iters_      = main_iters;
     error_.clear();
 
@@ -58,17 +59,17 @@ bool TraceDoc::open(const std::vector<u8>& bytes, u32 main_iters) {
         return false;
     }
 
-    has_firmware_ = variant_for_build_id(header_.build_id, &variant_);
+    firmware_ = factory_(header_.build_id);
     return true;
 }
 
 bool TraceDoc::snapshot_at(std::size_t index, Snapshot* out) {
-    if (!has_firmware_ || timeline_failed_) {
+    if (!firmware_ || timeline_failed_) {
         return false;
     }
     if (!timeline_) {
         timeline_.reset(new Timeline());
-        if (!timeline_->open(bytes_, main_iters_, 128)) {
+        if (!timeline_->open(bytes_, firmware_.get(), main_iters_, 128)) {
             error_           = timeline_->error();
             timeline_failed_ = true;
             timeline_.reset();

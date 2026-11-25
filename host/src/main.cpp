@@ -18,7 +18,9 @@
 #include "rewind/timeline.h"
 #include "rewind/tracediff.h"
 #include "rewind/tracedoc.h"
+#include "rewind/trace.h"
 #include "rewind/trace_reader.h"
+#include "rewind/version.h"
 #include "sim/mcu.h"
 
 namespace {
@@ -31,8 +33,9 @@ int usage() {
         "rewind -- deterministic record & replay for bare-metal firmware\n"
         "\n"
         "usage:\n"
+        "  rewind --version\n"
         "  rewind hunt   [--from N] [--to N] [--variant V] [--save FILE]\n"
-        "  rewind record [--seed N] [--variant V] [--tx N] [--iters N]\n"
+        "  rewind record [--seed N] [--variant V] [--tx N] [--iters N] [--skip N]\n"
         "                [--no-writes] --out FILE\n"
         "  rewind replay FILE [--iters N]\n"
         "  rewind dump   FILE [--limit N]\n"
@@ -55,6 +58,10 @@ int usage() {
         "  --tx N        bytes the UART delivers over the run (default 24)\n"
         "  --iters N     main-loop iterations (default 6000). Must match the\n"
         "                recording when replaying.\n"
+        "  --skip N      run N iterations before recording starts: the trace then\n"
+        "                begins mid-run, with the firmware's memory at that point\n"
+        "                stored in it, and --iters counts the recorded ones. Replay\n"
+        "                it with the same --iters.\n"
         "  --no-writes   omit MMIO writes from the trace: smaller, but replay\n"
         "                loses its consistency check\n"
         "  --no-sites    do not record probe points. The simulator still takes\n"
@@ -153,6 +160,7 @@ const char* event_name(rwd::u8 type) {
         case rwd::EV_IRQ_AT:     return "irq  ";
         case rwd::EV_SITE:       return "site ";
         case rwd::EV_DMA:        return "dma  ";
+        case rwd::EV_RAM:        return "ram  ";
         case rwd::EV_STOP:       return "stop ";
         default:                    return "?    ";
     }
@@ -168,6 +176,7 @@ struct Args {
     u64         seed     = 1;
     u32         tx       = 24;
     u32         iters    = 6000;
+    u32         skip     = 0;
     u32         limit    = 0;
     u64         threshold = rwhost::kDefaultLandingThreshold;
     u32         drain    = 4096;
@@ -219,6 +228,8 @@ Args parse(int argc, char** argv, int first) {
             a.tx = (u32)std::strtoul(argv[++i], 0, 10);
         } else if (opt == "--iters" && has_value) {
             a.iters = (u32)std::strtoul(argv[++i], 0, 10);
+        } else if (opt == "--skip" && has_value) {
+            a.skip = (u32)std::strtoul(argv[++i], 0, 10);
         } else if (opt == "--threshold" && has_value) {
             a.threshold = std::strtoull(argv[++i], 0, 10);
         } else if (opt == "--limit" && has_value) {
@@ -276,6 +287,7 @@ rwhost::RunConfig to_config(const Args& a) {
     cfg.seed       = a.seed;
     cfg.tx_total   = a.tx;
     cfg.main_iters = a.iters;
+    cfg.skip_iters = a.skip;
     cfg.variant    = a.variant;
     cfg.flags      = (a.writes ? rwd::kFlagRecordWrites : 0)
                    | (a.sites ? 0 : rwd::kFlagNoSites);
@@ -579,15 +591,15 @@ int cmd_dump(const Args& a) {
         if (ev.type == rwd::EV_IRQ_ENTER) {
             std::printf("%10llu  %-5s  vector %-3u %-13s\n",
                         (unsigned long long)ev.ts, event_name(ev.type), ev.addr,
-                        ev.addr == sim::kIrqUartRx ? "UART_RX" : "");
+                        rwhost::irq_name(ev.addr));
         } else if (ev.type == rwd::EV_IRQ_AT) {
             std::printf("%10llu  %-5s  vector %-3u %-13s returns to 0x%08X\n",
                         (unsigned long long)ev.ts, event_name(ev.type), ev.addr,
-                        ev.addr == sim::kIrqUartRx ? "UART_RX" : "", ev.value);
+                        rwhost::irq_name(ev.addr), ev.value);
         } else if (ev.type == rwd::EV_SITE) {
             std::printf("%10llu  %-5s  id %u\n",
                         (unsigned long long)ev.ts, event_name(ev.type), ev.addr);
-        } else if (ev.type == rwd::EV_DMA) {
+        } else if (ev.type == rwd::EV_DMA || ev.type == rwd::EV_RAM) {
             std::printf("%10llu  %-5s  region %u +%-4u len %-2u  ",
                         (unsigned long long)ev.ts, event_name(ev.type), ev.addr,
                         ev.value, (unsigned)ev.len);
@@ -687,8 +699,12 @@ int cmd_diff(const Args& a) {
     // The firmware as each run saw it at that point.
     rwhost::Snapshot sa, sb;
     if (A.snapshot_at(d.first, &sa) && B.snapshot_at(d.first, &sb)) {
-        const std::vector<rwhost::StateDelta> sd = rwhost::diff_state(sa.fw, sb.fw);
-        if (sd.empty()) {
+        const std::vector<rwhost::StateDelta> sd = rwhost::diff_fields(sa.fields, sb.fields);
+        if (sd.empty() && sa.state_hash != sb.state_hash) {
+            std::printf("\nthe firmware's state differs just before it, but it does not describe its\n"
+                        "fields: hash %016llx in A, %016llx in B\n",
+                        (unsigned long long)sa.state_hash, (unsigned long long)sb.state_hash);
+        } else if (sd.empty()) {
             std::printf("\nthe firmware's state is the same in both just before it\n");
         } else {
             std::printf("\nthe firmware's state just before it\n%12s %12s %12s\n", "", "A", "B");
@@ -915,6 +931,12 @@ int main(int argc, char** argv) {
     const std::string command = argv[1];
     if (command == "-h" || command == "--help" || command == "help") {
         usage();
+        return 0;
+    }
+    if (command == "-V" || command == "--version" || command == "version") {
+        std::printf("rewind %s (trace format %u, reads %u to %u)\n", REWIND_VERSION,
+                    (unsigned)rwd::kTraceVersion, (unsigned)rwd::kTraceMinVersion,
+                    (unsigned)rwd::kTraceVersion);
         return 0;
     }
 

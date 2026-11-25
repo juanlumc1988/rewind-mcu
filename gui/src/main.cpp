@@ -14,17 +14,30 @@
 #include <QTextStream>
 
 #include <cstdio>
+#include <cstring>
 
 #include "mainwindow.h"
+#include "rewind/version.h"
 
 int main(int argc, char** argv) {
+    // Before the application exists: asking for the version must work on a
+    // machine with no display, which QApplication would otherwise abort on.
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0) {
+            std::printf("rewind-gui %s\n", REWIND_VERSION);
+            return 0;
+        }
+    }
+
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("rewind-gui"));
+    QApplication::setApplicationVersion(QStringLiteral(REWIND_VERSION));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
         QStringLiteral("Look at a recorded trace, or compare two of them."));
     parser.addHelpOption();
+    parser.addVersionOption();
     parser.addPositionalArgument(QStringLiteral("A.rwd"), QStringLiteral("trace to open"));
     parser.addPositionalArgument(QStringLiteral("B.rwd"),
                                  QStringLiteral("second trace to compare against"),

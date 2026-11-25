@@ -9,7 +9,7 @@ namespace rwd {
 TraceReader::TraceReader()
     : data_(0), len_(0), block_end_(0), pos_(0), next_block_off_(0),
       last_ts_(0), last_addr_(0), expect_seq_(0), blocks_read_(0),
-      blocks_lost_(0), opened_(false), done_(false), err_(0) {
+      blocks_lost_(0), opened_(false), done_(false), past_image_(false), err_(0) {
     hdr_.magic    = 0;
     hdr_.version  = 0;
     hdr_.flags    = 0;
@@ -41,6 +41,7 @@ bool TraceReader::open(const u8* data, u32 len) {
     blocks_lost_    = 0;
     opened_         = false;
     done_           = false;
+    past_image_     = false;
     err_            = 0;
     hdr_.magic      = 0;
     hdr_.version    = 0;
@@ -166,6 +167,7 @@ bool TraceReader::next(Event* out) {
     bool has_arg = false;
     bool has_pc  = false;
     bool is_dma  = false;
+    const bool is_ram = (type == EV_RAM);
     switch (type) {
         case EV_MMIO_READ:
         case EV_MMIO_WRITE: is_mmio = true;  has_arg = true;  break;
@@ -194,6 +196,19 @@ bool TraceReader::next(Event* out) {
             }
             is_mmio = false; has_arg = false; is_dma = true;
             break;
+        case EV_RAM:
+            if (hdr_.version < 6) {
+                done_ = true;
+                return fail("unknown event type");
+            }
+            // An image of where the run started is only that if nothing has
+            // happened yet.
+            if (past_image_) {
+                done_ = true;
+                return fail("memory image after the run began");
+            }
+            is_mmio = false; has_arg = false; is_dma = true;   // laid out as a DMA read
+            break;
         default:
             done_ = true;
             return fail("unknown event type");
@@ -221,11 +236,11 @@ bool TraceReader::next(Event* out) {
         n = varint_decode(data_ + pos_ + off, avail - off, &raw);
         if (n == 0) {
             done_ = true;
-            return fail("malformed dma region varint");
+            return fail(is_ram ? "malformed ram region varint" : "malformed dma region varint");
         }
         if (raw > 0xFFFFFFFFu) {
             done_ = true;
-            return fail("dma region does not fit in 32 bits");
+            return fail(is_ram ? "ram region does not fit in 32 bits" : "dma region does not fit in 32 bits");
         }
         off += n;
         addr = (u32)raw;
@@ -233,28 +248,28 @@ bool TraceReader::next(Event* out) {
         n = varint_decode(data_ + pos_ + off, avail - off, &raw);
         if (n == 0) {
             done_ = true;
-            return fail("malformed dma offset varint");
+            return fail(is_ram ? "malformed ram offset varint" : "malformed dma offset varint");
         }
         if (raw > 0xFFFFFFFFu) {
             done_ = true;
-            return fail("dma offset does not fit in 32 bits");
+            return fail(is_ram ? "ram offset does not fit in 32 bits" : "dma offset does not fit in 32 bits");
         }
         off += n;
         value = (u32)raw;
 
         if (off >= avail) {
             done_ = true;
-            return fail("dma event cut short before its length");
+            return fail(is_ram ? "ram event cut short before its length" : "dma event cut short before its length");
         }
         dma_len = data_[pos_ + off];
         off += 1;
         if (dma_len == 0 || dma_len > kMaxDmaChunk) {
             done_ = true;
-            return fail("dma length is zero or longer than kMaxDmaChunk");
+            return fail(is_ram ? "ram length is zero or longer than kMaxRamChunk" : "dma length is zero or longer than kMaxDmaChunk");
         }
         if (avail - off < (u32)dma_len) {
             done_ = true;
-            return fail("dma event cut short before its data");
+            return fail(is_ram ? "ram event cut short before its data" : "dma event cut short before its data");
         }
         for (u32 i = 0; i < (u32)dma_len; ++i) {
             dma_data[i] = data_[pos_ + off + i];
@@ -327,6 +342,9 @@ bool TraceReader::next(Event* out) {
     }
 
     last_ts_ += delta_ts;
+    if (!is_ram) {
+        past_image_ = true;
+    }
 
     out->type  = type;
     out->ts    = last_ts_;

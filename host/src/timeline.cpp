@@ -3,21 +3,44 @@
 
 #include "rewind/timeline.h"
 
+#include "rewind/example_firmware.h"
+#include "rewind/trace_reader.h"
+
 namespace rwhost {
 
 Timeline::Timeline()
-    : variant_(fw::kBuggy), main_iters_(0), checkpoint_every_(128),
+    : firmware_(0), main_iters_(0), checkpoint_every_(128),
       event_count_(0), position_(0), last_search_seeks_(0), opened_(false),
       pending_(0), current_iter_(0) {}
 
-void Timeline::install(const fw::State& state, std::size_t cursor, u64 ts) {
+bool Timeline::install(const std::vector<u8>* state, std::size_t cursor, u64 ts) {
     rwd::hal_reset();
-    fw::rx_pump_reset();
-    fw::rx_pump_install();
-    fw::rx_pump_restore(state);
+    if (state != 0) {
+        firmware_->reset();
+        firmware_->install();
+        firmware_->restore_state(state->data());
+    } else if (!start_firmware(*firmware_, replay_, &error_)) {
+        // Where the recording began, which may be mid-run.
+        rwd::hal_reset();
+        return false;
+    }
     rwd::hal_attach(replay_.ops());
     rwd::hal_mode_replay();
     replay_.set_cursor(cursor, ts);
+    return true;
+}
+
+// What the firmware's state is right now, into a snapshot.
+void Timeline::fill(Snapshot* snap) const {
+    snap->state.assign(firmware_->state_size(), 0);
+    if (!snap->state.empty()) {
+        firmware_->save_state(snap->state.data());
+    }
+    snap->state_hash = firmware_->state_hash();
+    firmware_->describe_state(snap->state.data(), &snap->fields);
+    if (dynamic_cast<const ExampleFirmware*>(firmware_) != 0) {
+        ExampleFirmware::decode(snap->state.data(), snap->state.size(), &snap->fw);
+    }
 }
 
 void Timeline::capture(void* ctx) {
@@ -25,25 +48,52 @@ void Timeline::capture(void* ctx) {
     if (self->pending_ == 0) {
         return;
     }
-    self->pending_->fw         = fw::rx_pump_state();
-    self->pending_->state_hash = fw::rx_pump_state_hash();
-    self->pending_->ts         = self->replay_.now();
-    self->pending_->main_iter  = self->current_iter_;
-    self->pending_->valid      = true;
+    self->fill(self->pending_);
+    self->pending_->ts        = self->replay_.now();
+    self->pending_->main_iter = self->current_iter_;
+    self->pending_->valid     = true;
 }
 
 bool Timeline::open(const std::vector<u8>& trace, u32 main_iters,
                     u32 checkpoint_every) {
     opened_ = false;
+    error_.clear();
+
+    // Which example variant, by the build id in the header.
+    if (trace.size() > 0xFFFFFFFFu) {
+        error_ = "trace larger than 4 GiB";
+        return false;
+    }
+    rwd::TraceReader reader;
+    if (!reader.open(trace.data(), (u32)trace.size())) {
+        error_ = reader.error();
+        return false;
+    }
+    owned_ = make_example_firmware(reader.header().build_id);
+    if (!owned_) {
+        error_ = "trace was recorded by an unknown firmware build";
+        return false;
+    }
+    return open(trace, owned_.get(), main_iters, checkpoint_every);
+}
+
+bool Timeline::open(const std::vector<u8>& trace, Firmware* firmware, u32 main_iters,
+                    u32 checkpoint_every) {
+    opened_ = false;
     checkpoints_.clear();
     error_.clear();
 
-    if (!replay_.load(trace.data(), trace.size())) {
-        error_ = replay_.error();
+    if (firmware == 0) {
+        error_ = "no firmware to replay the trace with";
         return false;
     }
-    if (!variant_for_build_id(replay_.header().build_id, &variant_)) {
-        error_ = "trace was recorded by an unknown firmware build";
+    firmware_ = firmware;
+    if (owned_.get() != firmware) {
+        owned_.reset();
+    }
+
+    if (!replay_.load(trace.data(), trace.size())) {
+        error_ = replay_.error();
         return false;
     }
 
@@ -51,13 +101,11 @@ bool Timeline::open(const std::vector<u8>& trace, u32 main_iters,
     checkpoint_every_ = checkpoint_every ? checkpoint_every : 1u;
 
     // One full pass, snapshotting between iterations. Iteration boundaries
-    // are the only points where a struct copy is a complete description of
-    // the run: no call in progress, interrupt mask balanced.
-    // Value-initialised, so every field starts at zero -- including any added
-    // after this was written, which listing them by hand silently misses.
-    const fw::State empty = fw::State();
-
-    install(empty, 0, 0);
+    // are the only points where a copy of the state is a complete description
+    // of the run: no call in progress, interrupt mask balanced.
+    if (!install(0, replay_.first_event(), replay_.now())) {
+        return false;
+    }
     replay_.clear_capture_point();
 
     for (u32 iter = 0; iter < main_iters_; ++iter) {
@@ -66,10 +114,13 @@ bool Timeline::open(const std::vector<u8>& trace, u32 main_iters,
             cp.main_iter = iter;
             cp.cursor    = replay_.cursor();
             cp.ts        = replay_.now();
-            cp.fw        = fw::rx_pump_state();
+            cp.state.assign(firmware_->state_size(), 0);
+            if (!cp.state.empty()) {
+                firmware_->save_state(cp.state.data());
+            }
             checkpoints_.push_back(cp);
         }
-        fw::rx_pump_run(variant_, 1);
+        firmware_->run(1);
     }
 
     event_count_ = replay_.cursor();
@@ -101,6 +152,11 @@ bool Timeline::seek(std::size_t event_index, Snapshot* out) {
     if (event_index > event_count_) {
         event_index = event_count_;
     }
+    // Before the first event the firmware asks for there is only the state the
+    // recording began in -- a trace that began mid-run has a memory image there.
+    if (event_index < replay_.first_event()) {
+        event_index = replay_.first_event();
+    }
 
     const Checkpoint* cp = nearest(event_index);
     if (cp == 0) {
@@ -111,7 +167,7 @@ bool Timeline::seek(std::size_t event_index, Snapshot* out) {
     Snapshot snap;
     snap.event_index = event_index;
 
-    install(cp->fw, cp->cursor, cp->ts);
+    install(&cp->state, cp->cursor, cp->ts);
     pending_      = &snap;
     current_iter_ = cp->main_iter;
     replay_.set_capture_point(event_index, &Timeline::capture, this);
@@ -123,14 +179,13 @@ bool Timeline::seek(std::size_t event_index, Snapshot* out) {
         if (replay_.captured()) {
             break;
         }
-        fw::rx_pump_run(variant_, 1);
+        firmware_->run(1);
     }
 
     if (!replay_.captured()) {
         // The target is the end of the run: nothing further is served, so no
         // access ever sits on it. The final state is the answer.
-        snap.fw         = fw::rx_pump_state();
-        snap.state_hash = fw::rx_pump_state_hash();
+        fill(&snap);
         snap.ts         = replay_.now();
         snap.main_iter  = main_iters_;
         snap.valid      = true;
