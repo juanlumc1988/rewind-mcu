@@ -12,9 +12,12 @@
 #include <string>
 #include <vector>
 
+#include "rewind/describe.h"
 #include "rewind/landings.h"
 #include "rewind/session.h"
 #include "rewind/timeline.h"
+#include "rewind/tracediff.h"
+#include "rewind/tracedoc.h"
 #include "rewind/trace_reader.h"
 #include "sim/mcu.h"
 
@@ -38,6 +41,7 @@ int usage() {
         "                      [--find-consumed N] [--iters N]\n"
         "  rewind landings FILE [--threshold N] [--limit N]\n"
         "  rewind locate FILE [--iters N]\n"
+        "  rewind diff   A B [--time] [--strict] [--limit N] [--context N]\n"
         "\n"
         "common options:\n"
         "  --seed N      simulator seed; picks the interrupt arrival schedule\n"
@@ -60,6 +64,15 @@ int usage() {
         "locate -- find where interrupts landed in a trace recorded with\n"
         "--no-sites, by replaying the firmware with each candidate placement\n"
         "and keeping the one the rest of the trace agrees with.\n"
+        "\n"
+        "diff -- how two traces differ: the events they share, the first place\n"
+        "they part, and the firmware's state there in each. Exits 0 if the\n"
+        "traces are the same, 1 if they differ.\n"
+        "  --time            also require equal timestamps\n"
+        "  --strict          also compare what the free-running counter read\n"
+        "                    (by default it is ignored: it differs everywhere)\n"
+        "  --limit N         list at most N differing stretches (default 12)\n"
+        "  --context N       events shown before the first difference (default 3)\n"
         "\n"
         "landings -- where each interrupt landed, from the clock in the trace:\n"
         "  --threshold N     report interrupts taken more than N cycles after\n"
@@ -147,15 +160,7 @@ const char* event_name(rwd::u8 type) {
 
 // Names the peripheral register an address belongs to, so a dump reads as
 // firmware behaviour rather than as a column of hex.
-const char* register_name(u32 addr) {
-    switch (addr) {
-        case sim::kSystickCnt: return "SYSTICK.CNT";
-        case sim::kUart0Sr:    return "UART0.SR";
-        case sim::kUart0Dr:    return "UART0.DR";
-        case sim::kGpio0Odr:   return "GPIO0.ODR";
-        default:               return "";
-    }
-}
+using rwhost::register_name;
 
 struct Args {
     u64         from     = 1;
@@ -181,6 +186,10 @@ struct Args {
     std::string out;
     std::string save;
     std::string file;
+    std::string file2;
+    bool        cmp_time = false;
+    bool        strict   = false;
+    u32         context  = 3;
     bool        bad      = false;
 };
 
@@ -194,6 +203,12 @@ Args parse(int argc, char** argv, int first) {
             a.writes = false;
         } else if (opt == "--no-sites") {
             a.sites = false;
+        } else if (opt == "--time") {
+            a.cmp_time = true;
+        } else if (opt == "--strict") {
+            a.strict = true;
+        } else if (opt == "--context" && has_value) {
+            a.context = (u32)std::strtoul(argv[++i], 0, 10);
         } else if (opt == "--from" && has_value) {
             a.from = std::strtoull(argv[++i], 0, 10);
         } else if (opt == "--to" && has_value) {
@@ -246,6 +261,8 @@ Args parse(int argc, char** argv, int first) {
             }
         } else if (!opt.empty() && opt[0] != '-' && a.file.empty()) {
             a.file = opt;
+        } else if (!opt.empty() && opt[0] != '-' && a.file2.empty()) {
+            a.file2 = opt;
         } else {
             std::fprintf(stderr, "rewind: unexpected argument '%s'\n", opt.c_str());
             a.bad = true;
@@ -600,6 +617,121 @@ int cmd_dump(const Args& a) {
 
 } // namespace
 
+// Loads and describes one side of a diff.
+bool open_side(const char* label, const std::string& path, rwhost::TraceDoc* doc) {
+    std::vector<rwd::u8> bytes;
+    if (!read_file(path.c_str(), &bytes)) {
+        return false;
+    }
+    if (!doc->open(bytes)) {
+        std::fprintf(stderr, "rewind: %s: %s\n", path.c_str(), doc->error().c_str());
+        return false;
+    }
+    std::printf("%s  %s  (%s, seed %llu, %zu events, %zu bytes)\n", label, path.c_str(),
+                doc->variant_name(), (unsigned long long)doc->header().seed,
+                doc->events().size(), doc->size_bytes());
+    return true;
+}
+
+void print_stretch(const char* who, const std::vector<rwd::Event>& events,
+                   std::size_t first, std::size_t count) {
+    const std::size_t show = count < 3 ? count : 3;
+    for (std::size_t i = 0; i < show; ++i) {
+        std::printf("      %s %6zu  %s\n", who, first + i, rwhost::describe_event(events[first + i]).c_str());
+    }
+    if (count > show) {
+        std::printf("      %s        ... %zu more\n", who, count - show);
+    }
+}
+
+// How two traces differ. Exit status as diff(1): 0 the same, 1 different.
+int cmd_diff(const Args& a) {
+    if (a.file.empty() || a.file2.empty()) {
+        std::fprintf(stderr, "rewind: diff needs two trace files\n");
+        return 2;
+    }
+    rwhost::TraceDoc A, B;
+    if (!open_side("A", a.file, &A) || !open_side("B", a.file2, &B)) {
+        return 2;
+    }
+
+    rwhost::DiffOptions opt;
+    opt.compare_time = a.cmp_time;
+    if (!a.strict) {
+        // A free-running counter reads differently in every run; leaving it in
+        // would make every read of it a difference.
+        opt.ignore_value_at.push_back(sim::kSystickCnt);
+    }
+    const rwhost::TraceDiff d = rwhost::diff_traces(A.events(), B.events(), opt);
+
+    if (d.identical) {
+        std::printf("\nthe traces are the same (%zu events%s)\n", d.equal,
+                    a.cmp_time ? ", timestamps included" : "");
+        return 0;
+    }
+
+    std::printf("\n%zu events in common, %zu only in A, %zu only in B%s\n", d.equal, d.only_a, d.only_b,
+                d.minimal ? "" : "  (the alignment is valid but not the shortest: the traces differ too much)");
+
+    // The first difference, with what led up to it.
+    std::printf("\nthe first difference is at event %zu\n", d.first);
+    const std::size_t from = d.first > a.context ? d.first - a.context : 0;
+    for (std::size_t i = from; i < d.first; ++i) {
+        std::printf("      = %6zu  %s\n", i, rwhost::describe_event(A.events()[i]).c_str());
+    }
+    std::printf("      A %6zu  %s\n", d.first,
+                d.first < A.events().size() ? rwhost::describe_event(A.events()[d.first]).c_str() : "(the trace ends)");
+    std::printf("      B %6zu  %s\n", d.first,
+                d.first < B.events().size() ? rwhost::describe_event(B.events()[d.first]).c_str() : "(the trace ends)");
+
+    // The firmware as each run saw it at that point.
+    rwhost::Snapshot sa, sb;
+    if (A.snapshot_at(d.first, &sa) && B.snapshot_at(d.first, &sb)) {
+        const std::vector<rwhost::StateDelta> sd = rwhost::diff_state(sa.fw, sb.fw);
+        if (sd.empty()) {
+            std::printf("\nthe firmware's state is the same in both just before it\n");
+        } else {
+            std::printf("\nthe firmware's state just before it\n%12s %12s %12s\n", "", "A", "B");
+            for (std::size_t i = 0; i < sd.size(); ++i) {
+                std::printf("%12s %12llu %12llu\n", sd[i].name.c_str(),
+                            (unsigned long long)sd[i].a, (unsigned long long)sd[i].b);
+            }
+        }
+    } else if (!A.has_firmware() || !B.has_firmware()) {
+        std::printf("\n(no firmware state: a trace here is from a build this cannot run)\n");
+    }
+
+    // Where the runs part and where they meet again.
+    const u32 limit = a.limit != 0 ? a.limit : 12;
+    u32 shown = 0, total = 0;
+    for (std::size_t h = 0; h < d.hunks.size(); ++h) {
+        if (d.hunks[h].kind != rwhost::kHunkEqual) {
+            ++total;
+        }
+    }
+    std::printf("\nwhere they differ (%u stretch%s)\n", total, total == 1 ? "" : "es");
+    for (std::size_t h = 0; h < d.hunks.size() && shown < limit; ++h) {
+        const rwhost::DiffHunk& hk = d.hunks[h];
+        if (hk.kind == rwhost::kHunkEqual) {
+            std::printf("   %zu events the same\n", hk.na);
+            continue;
+        }
+        ++shown;
+        if (hk.na > 0) {
+            std::printf("   only in A, events %zu-%zu\n", hk.a, hk.a + hk.na - 1);
+            print_stretch("A", A.events(), hk.a, hk.na);
+        }
+        if (hk.nb > 0) {
+            std::printf("   only in B, events %zu-%zu\n", hk.b, hk.b + hk.nb - 1);
+            print_stretch("B", B.events(), hk.b, hk.nb);
+        }
+    }
+    if (shown < total) {
+        std::printf("   ... %u more (raise --limit)\n", total - shown);
+    }
+    return 1;
+}
+
 // Searches for where each interrupt landed in a trace recorded without its
 // probe points.
 int cmd_locate(const Args& a) {
@@ -799,6 +931,7 @@ int main(int argc, char** argv) {
     if (command == "inspect") return cmd_inspect(args);
     if (command == "landings") return cmd_landings(args);
     if (command == "locate") return cmd_locate(args);
+    if (command == "diff") return cmd_diff(args);
 
     std::fprintf(stderr, "rewind: unknown command '%s'\n", command.c_str());
     return usage();

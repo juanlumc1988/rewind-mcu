@@ -165,6 +165,80 @@ $ rewind inspect bug.rwd --at 2092 --walk 10 --checkpoints 1000000
 29062 events replayed to produce that.
 ```
 
+## Comparing two runs
+
+Two traces from different runs never match byte for byte, but the question
+worth asking is where two runs that should have behaved alike stop doing so.
+`rewind diff` aligns them, so what they share is paired off and what is left is
+what only one of them did, and shows the first place they part with the
+firmware's state in each:
+
+```console
+$ rewind record --seed 2 --variant buggy --out buggy.rwd
+$ rewind record --seed 2 --variant fixed --out fixed.rwd
+$ rewind diff buggy.rwd fixed.rwd
+6091 events in common, 5 only in A, 6 only in B
+
+the first difference is at event 2088
+      =   2086  read 0x40001004 UART0.DR -> 0x00000091
+      =   2087  read 0x40000000 SYSTICK.CNT -> 0x0000183C
+      A   2088  read 0x40000000 SYSTICK.CNT -> 0x0000183F
+      B   2088  write 0x40002000 GPIO0.ODR <- 0x00000014
+
+the firmware's state just before it
+                        A            B
+        tail            3            4
+     pending            0            1
+    consumed           19           20
+```
+
+The same seed, so the same interrupts arrive, and the two runs agree for 2088
+events. Then the fixed one drains byte 20 and the buggy one goes back to
+idling, because `pending` is 0 where it should be 1. That is the bug in
+[Going backwards](#going-backwards), found by a comparison instead of a walk.
+
+What counts as the same event is a choice. Timestamps are ignored unless
+`--time` is given, and so is what the free-running counter read unless
+`--strict` is, because it reads differently in every run and would make every
+read of it a difference. The alignment is a shortest edit script and is capped:
+past a point it is still a valid alignment but says it is not the shortest.
+It exits 0 if the traces are the same and 1 if not, like `diff(1)`.
+
+## The viewer
+
+`rewind-gui` shows the same two things as a window: one trace, or two side by
+side. It is a Qt 6 program and optional, so everything above works without it.
+
+![rewind-gui comparing the buggy and the fixed run of seed 2, at the first difference](docs/images/viewer.png)
+
+*A real render of the window, made headlessly with `--screenshot`, on the two
+traces from [Comparing two runs](#comparing-two-runs).*
+
+Each trace is a timeline with a row per kind of event (reads, writes,
+interrupts, probe points, DMA) and below it the events as a list. The wheel
+zooms about the pointer, dragging pans, a click puts the cursor on the event
+under it, a double click shows the whole run again, and the arrow keys step
+(Shift for ten). With two traces open, moving the cursor in one moves it to the
+same moment in the other, by the alignment `rewind diff` computes; events only
+one run has are tinted in the lists, and the *Differences* tab lists each place
+the runs part (`Ctrl+D` goes to the first, `F3` and `Shift+F3` walk them). The
+*State* tab is the firmware's variables at the cursor, one column per trace,
+with the ones that differ tinted: in the picture, `pending` is 0 where it
+should be 1: the lost update from [Going backwards](#going-backwards).
+
+```console
+$ rewind-gui buggy.rwd fixed.rwd --first-diff
+$ rewind-gui bug.rwd --at 2092
+$ rewind-gui buggy.rwd fixed.rwd --screenshot viewer.png   # no display needed
+```
+
+What the viewer draws and says comes from the same library the command line
+uses (`host/`), without Qt, and that part has its own tests. The Qt part has
+tests too, which drive the real widgets with the mouse, wheel and keyboard on
+a window with no screen. The state column needs the firmware to be one this
+build can run, as for `rewind inspect`; for any other trace the timeline and
+the lists work and the variables show a dash.
+
 ## Architecture
 
 Two worlds, kept apart by the build system rather than by discipline.
@@ -176,7 +250,8 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
 | `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `tests/`    | 166 cases, 5.4 million assertions              | C++17 |
+| `gui/`      | `rewind-gui`, the Qt viewer (optional)         | C++17, Qt 6 |
+| `tests/`    | 192 cases, 5.4 million assertions              | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with
@@ -210,8 +285,9 @@ ctest --test-dir build
 
 CI runs this on GCC and Clang, in Debug and RelWithDebInfo, with warnings as
 errors; separately under ASan and UBSan; separately again cross-compiled to a
-Cortex-M4; and once more with the Cortex-M interrupt trampoline run on an
-emulated one (see below).
+Cortex-M4; again with the Cortex-M interrupt trampoline run on an emulated one
+(see below); and once more with the viewer built and its tests run on both
+compilers.
 
 Cross-compiling the libraries that would ship on the device needs the
 `arm-none-eabi` toolchain (`sudo apt install gcc-arm-none-eabi` on
@@ -222,6 +298,16 @@ just to build and test on the host:
 cmake -S . -B build-arm -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
       -DREWIND_BUILD_TESTS=OFF
 cmake --build build-arm --target rewind_core rewind_target
+```
+
+The viewer is off by default, because it is the only part that needs Qt. With
+Qt 6 Widgets installed (`sudo apt install qt6-base-dev` on Ubuntu/Debian):
+
+```console
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DREWIND_BUILD_GUI=ON
+cmake --build build -j
+./build/rewind-gui a.rwd b.rwd
+QT_QPA_PLATFORM=offscreen ctest --test-dir build   # the viewer's tests need no display
 ```
 
 The Cortex-M interrupt trampoline is ARM assembly that reads the exception
@@ -497,7 +583,6 @@ Stated plainly, because the gap between this and the pitch is real:
   want finer granularity, which needs the call stack captured too.
 - **No transport.** `drain()` takes a function pointer and the tests feed it a
   simulated UART. No SWO, RTT or real UART driver ships here.
-- **No GUI.** Timeline scrubbing and trace diffing are the eventual Qt layer.
 - **CPU overhead is unmeasured.** Flash cost is now measured in CI (3.7 KB to
   record), but the <2% runtime target is still a design goal with no number
   behind it. It cannot get one without a part to run on.
@@ -513,7 +598,7 @@ Stated plainly, because the gap between this and the pitch is real:
 2. Run it on a part: a UART or RTT transport, and a measured overhead number
    held in CI.
 3. DMA events. Done: see [DMA](#dma).
-4. Qt timeline and two-trace diffing, over the navigation that now exists.
+4. Qt timeline and two-trace diffing. Done: see [The viewer](#the-viewer).
 
 ## Related projects
 
