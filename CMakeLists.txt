@@ -6,6 +6,7 @@ project(rewind LANGUAGES CXX)
 
 option(REWIND_BUILD_TESTS "Build the unit tests" ON)
 option(REWIND_WERROR      "Treat warnings as errors" OFF)
+option(REWIND_BUILD_GUI   "Build rewind-gui, the Qt viewer (needs Qt 6 Widgets)" OFF)
 
 # ---------------------------------------------------------------------------
 # Two worlds, deliberately kept apart.
@@ -144,4 +145,43 @@ if(REWIND_BUILD_TESTS)
     rewind_host_side(rewind_tests)
 
     add_test(NAME unit COMMAND rewind_tests --force-colors=off)
+endif()
+
+# ---------------------------------------------------------------------------
+# The viewer. Off by default: it is the only part that needs Qt, and everything
+# it shows comes from the Qt-free host library, which the command line uses too.
+# ---------------------------------------------------------------------------
+
+if(REWIND_BUILD_GUI)
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+
+    set(REWIND_GUI_SOURCES
+        gui/src/timelinewidget.cpp
+        gui/src/eventmodel.cpp
+        gui/src/statepanel.cpp
+        gui/src/mainwindow.cpp)
+
+    # Everything but main(), so the tests can build a window without a process.
+    add_library(rewind_gui_lib STATIC ${REWIND_GUI_SOURCES})
+    target_include_directories(rewind_gui_lib PUBLIC gui/src)
+    target_link_libraries(rewind_gui_lib PUBLIC rewind_host Qt6::Widgets)
+    # Qt's `emit`, `signals` and `slots` are macros, and `emit` is also a method
+    # of the trace writer. Keep the macros out and spell them Q_EMIT, Q_SIGNALS.
+    target_compile_definitions(rewind_gui_lib PUBLIC QT_NO_KEYWORDS)
+    set_target_properties(rewind_gui_lib PROPERTIES AUTOMOC ON)
+    rewind_host_side(rewind_gui_lib)
+
+    add_executable(rewind-gui gui/src/main.cpp)
+    target_link_libraries(rewind-gui PRIVATE rewind_gui_lib)
+    rewind_host_side(rewind-gui)
+
+    if(REWIND_BUILD_TESTS)
+        find_package(Qt6 REQUIRED COMPONENTS Test)
+        add_executable(rewind_gui_tests gui/tests/gui_test.cpp)
+        target_link_libraries(rewind_gui_tests PRIVATE rewind_gui_lib Qt6::Test)
+        set_target_properties(rewind_gui_tests PROPERTIES AUTOMOC ON)
+        rewind_host_side(rewind_gui_tests)
+        add_test(NAME gui COMMAND rewind_gui_tests)
+        set_tests_properties(gui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
 endif()
