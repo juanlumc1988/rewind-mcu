@@ -181,6 +181,9 @@ bool MainWindow::openFile(Side side, const QString& path, QString* error) {
 bool MainWindow::openBytes(Side side, const std::vector<rwd::u8>& bytes, const QString& name,
                            QString* error) {
     std::unique_ptr<rwhost::TraceDoc> d(new rwhost::TraceDoc());
+    if (factory_) {
+        d->set_firmware_factory(factory_);
+    }
     if (!d->open(bytes, main_iters_)) {
         if (error) {
             *error = QStringLiteral("%1: %2").arg(name, QString::fromStdString(d->error()));
@@ -336,7 +339,7 @@ void MainWindow::refresh() {
     rwhost::Snapshot sa, sb;
     const bool has_a = doc_[kSideA] && doc_[kSideA]->snapshot_at(cursor_[kSideA], &sa);
     const bool has_b = doc_[kSideB] && doc_[kSideB]->snapshot_at(cursor_[kSideB], &sb);
-    state_->setStates(has_a, sa.fw, has_b, sb.fw, comparing());
+    state_->setStates(has_a ? &sa : nullptr, has_b ? &sb : nullptr, comparing());
 
     QString line = summary();
     if (comparing()) {

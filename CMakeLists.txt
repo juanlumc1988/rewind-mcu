@@ -103,6 +103,8 @@ rewind_target_side(rewind_fw)
 # ---------------------------------------------------------------------------
 
 add_library(rewind_host STATIC
+    host/src/firmware.cpp
+    host/src/example_firmware.cpp
     host/src/replay.cpp
     host/src/session.cpp
     host/src/timeline.cpp
@@ -142,6 +144,7 @@ if(REWIND_BUILD_TESTS)
         tests/test_locate.cpp
         tests/test_dma.cpp
         tests/test_nested.cpp
+        tests/test_firmware.cpp
         tests/test_tracediff.cpp
         tests/test_view.cpp
         tests/test_version.cpp
@@ -187,6 +190,7 @@ if(REWIND_BUILD_GUI)
         find_package(Qt6 REQUIRED COMPONENTS Test)
         add_executable(rewind_gui_tests gui/tests/gui_test.cpp)
         target_link_libraries(rewind_gui_tests PRIVATE rewind_gui_lib Qt6::Test)
+        target_include_directories(rewind_gui_tests PRIVATE tests)
         set_target_properties(rewind_gui_tests PROPERTIES AUTOMOC ON)
         rewind_host_side(rewind_gui_tests)
         add_test(NAME gui COMMAND rewind_gui_tests)

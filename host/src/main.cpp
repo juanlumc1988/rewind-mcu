@@ -690,8 +690,12 @@ int cmd_diff(const Args& a) {
     // The firmware as each run saw it at that point.
     rwhost::Snapshot sa, sb;
     if (A.snapshot_at(d.first, &sa) && B.snapshot_at(d.first, &sb)) {
-        const std::vector<rwhost::StateDelta> sd = rwhost::diff_state(sa.fw, sb.fw);
-        if (sd.empty()) {
+        const std::vector<rwhost::StateDelta> sd = rwhost::diff_fields(sa.fields, sb.fields);
+        if (sd.empty() && sa.state_hash != sb.state_hash) {
+            std::printf("\nthe firmware's state differs just before it, but it does not describe its\n"
+                        "fields: hash %016llx in A, %016llx in B\n",
+                        (unsigned long long)sa.state_hash, (unsigned long long)sb.state_hash);
+        } else if (sd.empty()) {
             std::printf("\nthe firmware's state is the same in both just before it\n");
         } else {
             std::printf("\nthe firmware's state just before it\n%12s %12s %12s\n", "", "A", "B");

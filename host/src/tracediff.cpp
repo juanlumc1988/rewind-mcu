@@ -3,6 +3,8 @@
 
 #include "rewind/tracediff.h"
 
+#include "rewind/example_firmware.h"
+
 #include <algorithm>
 #include <cstdio>
 
@@ -284,34 +286,56 @@ std::size_t map_b_to_a(const TraceDiff& d, std::size_t b_index, std::size_t a_si
     return map_index(d, b_index, a_size, false);
 }
 
-std::vector<StateDelta> diff_state(const fw::State& a, const fw::State& b) {
+std::vector<StateDelta> diff_fields(const std::vector<StateField>& a,
+                                    const std::vector<StateField>& b) {
     std::vector<StateDelta> out;
-    auto field = [&out](const char* name, u64 x, u64 y) {
-        if (x != y) {
+    std::vector<bool> used(b.size(), false);
+
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        u64  other = 0;
+        // The field of the same name, preferring the one at the same place:
+        // the usual case is two lists with the same fields in the same order.
+        std::size_t at = b.size();
+        if (i < b.size() && b[i].name == a[i].name) {
+            at = i;
+        } else {
+            for (std::size_t k = 0; k < b.size(); ++k) {
+                if (!used[k] && b[k].name == a[i].name) {
+                    at = k;
+                    break;
+                }
+            }
+        }
+        if (at < b.size()) {
+            used[at] = true;
+            other    = b[at].value;
+        }
+        if (a[i].value != other) {
             StateDelta d;
-            d.name = name;
-            d.a    = x;
-            d.b    = y;
+            d.name = a[i].name;
+            d.a    = a[i].value;
+            d.b    = other;
             out.push_back(d);
         }
-    };
-    field("head",       a.head,       b.head);
-    field("tail",       a.tail,       b.tail);
-    field("pending",    a.pending,    b.pending);
-    field("consumed",   a.consumed,   b.consumed);
-    field("checksum",   a.checksum,   b.checksum);
-    field("last_stamp", a.last_stamp, b.last_stamp);
-    field("overflows",  a.overflows,  b.overflows);
-    field("dma_tail",   a.dma_tail,   b.dma_tail);
-    field("dma_lost",   a.dma_lost,   b.dma_lost);
-    for (u32 i = 0; i < fw::kRingSize; ++i) {
-        if (a.ring[i] != b.ring[i]) {
-            char name[16];
-            std::snprintf(name, sizeof(name), "ring[%u]", i);
-            field(name, a.ring[i], b.ring[i]);
+    }
+    for (std::size_t k = 0; k < b.size(); ++k) {
+        if (!used[k] && b[k].value != 0) {
+            StateDelta d;
+            d.name = b[k].name;
+            d.a    = 0;
+            d.b    = b[k].value;
+            out.push_back(d);
         }
     }
     return out;
+}
+
+// Through the example's own description, so there is one list of its fields.
+std::vector<StateDelta> diff_state(const fw::State& a, const fw::State& b) {
+    std::vector<StateField> fa, fb;
+    ExampleFirmware::describe(a, &fa);
+    ExampleFirmware::describe(b, &fb);
+    return diff_fields(fa, fb);
 }
 
 } // namespace rwhost

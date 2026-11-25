@@ -3,6 +3,7 @@
 
 #include "rewind/session.h"
 
+#include "rewind/example_firmware.h"
 #include "rewind/recorder.h"
 #include "sim/mcu.h"
 
@@ -172,8 +173,8 @@ RecordResult record_run(const RunConfig& cfg) {
     return result;
 }
 
-ReplayResult replay_run_as(const std::vector<u8>& trace, fw::Variant variant,
-                           u32 main_iters) {
+ReplayResult replay_firmware(Firmware& firmware, const std::vector<u8>& trace,
+                             u32 main_iters) {
     ReplayResult result;
 
     ReplayHal hal;
@@ -186,14 +187,14 @@ ReplayResult replay_run_as(const std::vector<u8>& trace, fw::Variant variant,
     result.sites_recorded = hal.sites_recorded();
 
     rwd::hal_reset();
-    fw::rx_pump_reset();
-    fw::rx_pump_install();
+    firmware.reset();
+    firmware.install();
     rwd::hal_attach(hal.ops());
     rwd::hal_mode_replay();
 
-    fw::rx_pump_run(variant, main_iters);
+    firmware.run(main_iters);
 
-    result.fw              = snapshot();
+    result.fw.state_hash   = firmware.state_hash();
     result.diverged        = hal.diverged() || rwd::hal_diverged();
     result.divergence      = hal.divergence();
     result.events_consumed = hal.cursor();
@@ -204,28 +205,76 @@ ReplayResult replay_run_as(const std::vector<u8>& trace, fw::Variant variant,
     return result;
 }
 
+ReplayResult replay_run_as(const std::vector<u8>& trace, fw::Variant variant,
+                           u32 main_iters) {
+    ExampleFirmware example(variant);
+    ReplayResult result = replay_firmware(example, trace, main_iters);
+    if (result.loaded) {
+        // The example's own outcome: the fields of its state that the tools
+        // and the tests compare, which a generic replay has no business knowing.
+        result.fw = snapshot();
+    }
+    return result;
+}
+
+FirmwareRecording record_firmware(Firmware& firmware, const rwd::HalOps* backend,
+                                  u64 build_id, u64 seed, u16 flags, u32 main_iters) {
+    FirmwareRecording result;
+
+    VectorSink          sink;
+    rwd::TraceWriter writer;
+    u8                  block[kBlockBufferBytes];
+
+    rwd::hal_reset();
+    firmware.reset();
+    firmware.install();
+    rwd::hal_attach(backend);
+
+    if (!writer.begin(&VectorSink::write, &sink, block, sizeof(block), build_id, seed, flags)) {
+        result.writer_error = writer.error();
+        rwd::hal_reset();
+        return result;
+    }
+
+    rwd::hal_mode_record(&writer);
+    firmware.run(main_iters);
+    writer.finish(rwd::hal_now());
+    rwd::hal_mode_off();
+
+    result.trace        = sink.bytes;
+    result.state_hash   = firmware.state_hash();
+    result.events       = writer.events();
+    result.writer_ok    = writer.ok();
+    result.writer_error = writer.error();
+
+    // Detach before the backend can go out of scope: the shim holds a pointer to it.
+    rwd::hal_reset();
+    return result;
+}
+
 namespace {
 
 struct LocateCtx {
-    fw::Variant variant;
-    u32         main_iters;
+    Firmware* firmware;
+    u32       main_iters;
 };
 
-// One replay of the example firmware, for the search.
-void run_example(void* ctx, ReplayHal* hal) {
+// One replay of the firmware, for the search.
+void run_firmware_once(void* ctx, ReplayHal* hal) {
     const LocateCtx* c = static_cast<const LocateCtx*>(ctx);
     rwd::hal_reset();
-    fw::rx_pump_reset();
-    fw::rx_pump_install();
+    c->firmware->reset();
+    c->firmware->install();
     rwd::hal_attach(hal->ops());
     rwd::hal_mode_replay();
-    fw::rx_pump_run(c->variant, c->main_iters);
+    c->firmware->run(c->main_iters);
     rwd::hal_reset();
 }
 
 } // namespace
 
-LocateReport locate_run(const std::vector<u8>& trace, u32 main_iters) {
+LocateReport locate_firmware(Firmware& firmware, const std::vector<u8>& trace,
+                             u32 main_iters) {
     LocateReport report;
 
     ReplayHal probe;
@@ -233,20 +282,35 @@ LocateReport locate_run(const std::vector<u8>& trace, u32 main_iters) {
         report.error = probe.error();
         return report;
     }
-    fw::Variant variant;
-    if (!variant_for_build_id(probe.header().build_id, &variant)) {
-        report.error = "trace was recorded by an unknown firmware build";
-        return report;
-    }
     report.loaded       = true;
     report.events_total = probe.event_count();
 
     LocateCtx ctx;
-    ctx.variant    = variant;
+    ctx.firmware   = &firmware;
     ctx.main_iters = main_iters;
-    report.located = locate_landings(trace, &run_example, &ctx);
+    report.located = locate_landings(trace, &run_firmware_once, &ctx);
     // The search's last run is the located replay, so the firmware state is
     // its outcome.
+    report.fw.state_hash = firmware.state_hash();
+    return report;
+}
+
+LocateReport locate_run(const std::vector<u8>& trace, u32 main_iters) {
+    ReplayHal probe;
+    if (!probe.load(trace.data(), trace.size())) {
+        LocateReport report;
+        report.error = probe.error();
+        return report;
+    }
+    fw::Variant variant;
+    if (!variant_for_build_id(probe.header().build_id, &variant)) {
+        LocateReport report;
+        report.error = "trace was recorded by an unknown firmware build";
+        return report;
+    }
+
+    ExampleFirmware example(variant);
+    LocateReport report = locate_firmware(example, trace, main_iters);
     report.fw = snapshot();
     return report;
 }

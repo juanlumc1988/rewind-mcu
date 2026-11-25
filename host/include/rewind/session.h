@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "fw/rx_pump.h"
+#include "rewind/firmware.h"
 #include "rewind/locate.h"
 #include "rewind/replay.h"
 
@@ -144,6 +145,37 @@ LocateReport locate_run(const std::vector<u8>& trace, u32 main_iters);
 // Exists to demonstrate what replaying the wrong binary looks like.
 ReplayResult replay_run_as(const std::vector<u8>& trace, fw::Variant variant,
                            u32 main_iters);
+
+// -- any firmware, not only the example --
+//
+// The same three operations for a firmware that implements Firmware. None of
+// them checks the trace's build id: the caller has chosen the firmware, and
+// only the caller knows which ids go with it.
+
+// Replays `trace` with `firmware`, from the shim's reset to the end of
+// `main_iters` iterations. The outcome carries the state hash and nothing else
+// of FirmwareOutcome, which describes the example's fields.
+ReplayResult replay_firmware(Firmware& firmware, const std::vector<u8>& trace,
+                             u32 main_iters);
+
+// Runs `firmware` against `backend` -- a simulator of the part, a scripted
+// device, anything that provides a HalOps -- and records what it saw. This is
+// what the device does, done on a workstation: how a firmware is tested before
+// it has hardware, and how a trace for a test is made.
+struct FirmwareRecording {
+    std::vector<u8> trace;
+    u64             state_hash = 0;
+    u32             events     = 0;
+    bool            writer_ok  = false;
+    std::string     writer_error;
+};
+FirmwareRecording record_firmware(Firmware& firmware, const rwd::HalOps* backend,
+                                  u64 build_id, u64 seed, u16 flags, u32 main_iters);
+
+// locate_run() for any firmware: where interrupts landed in a trace recorded
+// without probe points. `fw.state_hash` is the located replay's.
+LocateReport locate_firmware(Firmware& firmware, const std::vector<u8>& trace,
+                             u32 main_iters);
 
 } // namespace rwhost
 

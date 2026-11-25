@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "rewind/tracediff.h"
@@ -40,6 +41,12 @@ public:
     // Main-loop iterations of the recording, as for `rewind --iters`. Set it
     // before opening; it applies to traces opened afterwards.
     void setMainIters(unsigned iters) { main_iters_ = iters; }
+
+    // How a trace's build id becomes the firmware that replays it; applies to
+    // traces opened afterwards. The default knows the example firmware's
+    // builds. A viewer for another firmware gives its own (see firmware.h) and
+    // is otherwise this same window.
+    void setFirmwareFactory(rwhost::FirmwareFactory factory) { factory_ = std::move(factory); }
 
     // False, with `error` set, when the trace cannot be read; the side then
     // keeps what it had.
@@ -86,6 +93,7 @@ private:
     };
 
     unsigned                           main_iters_;
+    rwhost::FirmwareFactory            factory_;
     std::unique_ptr<rwhost::TraceDoc>  doc_[2];
     QString                            name_[2];
     rwhost::TraceDiff                  diff_;
