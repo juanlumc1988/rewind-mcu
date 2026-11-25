@@ -18,7 +18,9 @@
 #include "rewind/timeline.h"
 #include "rewind/tracediff.h"
 #include "rewind/tracedoc.h"
+#include "rewind/trace.h"
 #include "rewind/trace_reader.h"
+#include "rewind/version.h"
 #include "sim/mcu.h"
 
 namespace {
@@ -31,6 +33,7 @@ int usage() {
         "rewind -- deterministic record & replay for bare-metal firmware\n"
         "\n"
         "usage:\n"
+        "  rewind --version\n"
         "  rewind hunt   [--from N] [--to N] [--variant V] [--save FILE]\n"
         "  rewind record [--seed N] [--variant V] [--tx N] [--iters N]\n"
         "                [--no-writes] --out FILE\n"
@@ -915,6 +918,12 @@ int main(int argc, char** argv) {
     const std::string command = argv[1];
     if (command == "-h" || command == "--help" || command == "help") {
         usage();
+        return 0;
+    }
+    if (command == "-V" || command == "--version" || command == "version") {
+        std::printf("rewind %s (trace format %u, reads %u to %u)\n", REWIND_VERSION,
+                    (unsigned)rwd::kTraceVersion, (unsigned)rwd::kTraceMinVersion,
+                    (unsigned)rwd::kTraceVersion);
         return 0;
     }
 

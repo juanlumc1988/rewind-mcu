@@ -2,7 +2,7 @@
 # Part of rewind -- deterministic record & replay for bare-metal firmware.
 
 cmake_minimum_required(VERSION 3.16)
-project(rewind LANGUAGES CXX)
+project(rewind VERSION 1.0.0 LANGUAGES CXX)
 
 option(REWIND_BUILD_TESTS "Build the unit tests" ON)
 option(REWIND_WERROR      "Treat warnings as errors" OFF)
@@ -64,13 +64,19 @@ endfunction()
 # Target side
 # ---------------------------------------------------------------------------
 
+# The version, for the tools to report and for code that has to check which
+# rewind it was built against. Generated, so there is one place to change it.
+configure_file(cmake/version.h.in
+               ${CMAKE_CURRENT_BINARY_DIR}/generated/rewind/version.h @ONLY)
+
 add_library(rewind_core STATIC
     core/src/varint.cpp
     core/src/crc32.cpp
     core/src/trace_writer.cpp
     core/src/trace_reader.cpp
     core/src/ring_buffer.cpp)
-target_include_directories(rewind_core PUBLIC core/include)
+target_include_directories(rewind_core PUBLIC core/include
+    ${CMAKE_CURRENT_BINARY_DIR}/generated)
 rewind_target_side(rewind_core)
 
 add_library(rewind_target STATIC
@@ -137,6 +143,7 @@ if(REWIND_BUILD_TESTS)
         tests/test_dma.cpp
         tests/test_tracediff.cpp
         tests/test_view.cpp
+        tests/test_version.cpp
         tests/test_recorder.cpp
         tests/test_timeline.cpp
         tests/test_determinism.cpp)
