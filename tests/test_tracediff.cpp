@@ -333,3 +333,42 @@ TEST_CASE("a failing run against a clean one, from the example firmware") {
     CHECK(d.equal > a.size() / 2);
     check_alignment(a, b, d, o);
 }
+
+TEST_CASE("an event of one trace is mapped to the moment it corresponds to in the other") {
+    // A:  1 2 3 4 5 6 7        B:  1 2 3 9 9 5 6 7
+    //     =====      ===            =====       ===
+    // 4 is only in A; 9 9 are only in B.
+    const std::vector<rwd::Event> a = seq({1, 2, 3, 4, 5, 6, 7});
+    const std::vector<rwd::Event> b = seq({1, 2, 3, 9, 9, 5, 6, 7});
+    const rwhost::TraceDiff d = rwhost::diff_traces(a, b);
+
+    // What they share maps one to one.
+    CHECK(rwhost::map_a_to_b(d, 0, b.size()) == 0u);
+    CHECK(rwhost::map_a_to_b(d, 2, b.size()) == 2u);
+    CHECK(rwhost::map_a_to_b(d, 4, b.size()) == 5u);   // the 5
+    CHECK(rwhost::map_a_to_b(d, 6, b.size()) == 7u);   // the 7
+    CHECK(rwhost::map_b_to_a(d, 5, a.size()) == 4u);
+    CHECK(rwhost::map_b_to_a(d, 7, a.size()) == 6u);
+
+    // What only one has maps to where it would go in the other.
+    CHECK(rwhost::map_a_to_b(d, 3, b.size()) == 3u);   // the 4: before the 9s
+    CHECK(rwhost::map_b_to_a(d, 3, a.size()) == 3u);   // a 9: where the 4 is
+    CHECK(rwhost::map_b_to_a(d, 4, a.size()) == 3u);
+
+    // Equal traces map to themselves; empty ones to zero; past the end clamps.
+    const rwhost::TraceDiff same = rwhost::diff_traces(a, a);
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        CHECK(rwhost::map_a_to_b(same, i, a.size()) == i);
+    }
+    CHECK(rwhost::map_a_to_b(d, 1000, b.size()) == b.size() - 1u);
+    CHECK(rwhost::map_a_to_b(d, 3, 0) == 0u);
+}
+
+TEST_CASE("mapping across a pure insertion and a pure deletion") {
+    const std::vector<rwd::Event> base = seq({1, 2, 3});
+    const std::vector<rwd::Event> longer = seq({1, 2, 7, 3});
+    const rwhost::TraceDiff d = rwhost::diff_traces(base, longer);
+    CHECK(rwhost::map_a_to_b(d, 2, longer.size()) == 3u);   // the 3 moved down one
+    CHECK(rwhost::map_b_to_a(d, 3, base.size()) == 2u);
+    CHECK(rwhost::map_b_to_a(d, 2, base.size()) == 2u);     // the 7: where the 3 is
+}

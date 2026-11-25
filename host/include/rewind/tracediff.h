@@ -79,6 +79,13 @@ TraceDiff diff_traces(const std::vector<rwd::Event>& a,
                       const std::vector<rwd::Event>& b,
                       const DiffOptions& options = DiffOptions());
 
+// Where event `a_index` of the first trace sits in the second, by the
+// alignment: the event it was paired with, or, for one the other trace does not
+// have, the place in the other trace where it would go. Clamped to the last
+// event. Used to keep two views of the two traces on the same moment.
+std::size_t map_a_to_b(const TraceDiff& d, std::size_t a_index, std::size_t b_size);
+std::size_t map_b_to_a(const TraceDiff& d, std::size_t b_index, std::size_t a_size);
+
 // Whether two events are the same under these options.
 bool events_match(const rwd::Event& a, const rwd::Event& b, const DiffOptions& options);
 

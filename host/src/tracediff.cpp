@@ -240,6 +240,50 @@ TraceDiff diff_traces(const std::vector<rwd::Event>& a, const std::vector<rwd::E
     return out;
 }
 
+namespace {
+
+// `from_a` says which side `index` is on. The same walk serves both.
+std::size_t map_index(const TraceDiff& d, std::size_t index, std::size_t other_size, bool from_a) {
+    std::size_t result    = 0;
+    std::size_t gap_there = 0;      // where, on the other side, the current differing stretch begins
+    bool        prev_equal = true;
+
+    for (std::size_t i = 0; i < d.hunks.size(); ++i) {
+        const DiffHunk& h = d.hunks[i];
+        const std::size_t here        = from_a ? h.a  : h.b;
+        const std::size_t count       = from_a ? h.na : h.nb;
+        const std::size_t there       = from_a ? h.b  : h.a;
+        const std::size_t there_count = from_a ? h.nb : h.na;
+
+        // A stretch of differences can be several hunks (one side's events,
+        // then the other's). It begins at the first of them.
+        if (h.kind != kHunkEqual && prev_equal) {
+            gap_there = there;
+        }
+        prev_equal = (h.kind == kHunkEqual);
+
+        // A hunk with none of this side's events cannot hold the index; the
+        // index belongs to the next one.
+        if (count > 0 && index < here + count) {
+            result = (h.kind == kHunkEqual) ? there + (index - here) : gap_there;
+            return other_size == 0 ? 0 : (result < other_size ? result : other_size - 1);
+        }
+        result = there + there_count;
+    }
+    // Past the end of the alignment.
+    return other_size == 0 ? 0 : (result < other_size ? result : other_size - 1);
+}
+
+} // namespace
+
+std::size_t map_a_to_b(const TraceDiff& d, std::size_t a_index, std::size_t b_size) {
+    return map_index(d, a_index, b_size, true);
+}
+
+std::size_t map_b_to_a(const TraceDiff& d, std::size_t b_index, std::size_t a_size) {
+    return map_index(d, b_index, a_size, false);
+}
+
 std::vector<StateDelta> diff_state(const fw::State& a, const fw::State& b) {
     std::vector<StateDelta> out;
     auto field = [&out](const char* name, u64 x, u64 y) {
