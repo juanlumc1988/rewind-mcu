@@ -165,6 +165,45 @@ $ rewind inspect bug.rwd --at 2092 --walk 10 --checkpoints 1000000
 29062 events replayed to produce that.
 ```
 
+## Comparing two runs
+
+Two traces from different runs never match byte for byte, but the question
+worth asking is where two runs that should have behaved alike stop doing so.
+`rewind diff` aligns them, so what they share is paired off and what is left is
+what only one of them did, and shows the first place they part with the
+firmware's state in each:
+
+```console
+$ rewind record --seed 2 --variant buggy --out buggy.rwd
+$ rewind record --seed 2 --variant fixed --out fixed.rwd
+$ rewind diff buggy.rwd fixed.rwd
+6091 events in common, 5 only in A, 6 only in B
+
+the first difference is at event 2088
+      =   2086  read 0x40001004 UART0.DR -> 0x00000091
+      =   2087  read 0x40000000 SYSTICK.CNT -> 0x0000183C
+      A   2088  read 0x40000000 SYSTICK.CNT -> 0x0000183F
+      B   2088  write 0x40002000 GPIO0.ODR <- 0x00000014
+
+the firmware's state just before it
+                        A            B
+        tail            3            4
+     pending            0            1
+    consumed           19           20
+```
+
+The same seed, so the same interrupts arrive, and the two runs agree for 2088
+events. Then the fixed one drains byte 20 and the buggy one goes back to
+idling, because `pending` is 0 where it should be 1. That is the bug in
+[Going backwards](#going-backwards), found by a comparison instead of a walk.
+
+What counts as the same event is a choice. Timestamps are ignored unless
+`--time` is given, and so is what the free-running counter read unless
+`--strict` is, because it reads differently in every run and would make every
+read of it a difference. The alignment is a shortest edit script and is capped:
+past a point it is still a valid alignment but says it is not the shortest.
+It exits 0 if the traces are the same and 1 if not, like `diff(1)`.
+
 ## Architecture
 
 Two worlds, kept apart by the build system rather than by discipline.
@@ -176,7 +215,7 @@ Two worlds, kept apart by the build system rather than by discipline.
 | `sim/`      | A toy MCU: cycle counter, UART, GPIO           | C++98 |
 | `firmware/` | Example firmware, in buggy and fixed variants  | C++98 |
 | `host/`     | Replay engine, timeline, session orchestration, CLI | C++17 |
-| `tests/`    | 166 cases, 5.4 million assertions              | C++17 |
+| `tests/`    | 190 cases, 5.4 million assertions              | C++17 |
 
 Everything that conceptually ships on the device is strict C++98 with no
 heap, no exceptions and no RTTI, and CMake enforces it with

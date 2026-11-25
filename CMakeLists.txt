@@ -100,7 +100,11 @@ add_library(rewind_host STATIC
     host/src/session.cpp
     host/src/timeline.cpp
     host/src/landings.cpp
-    host/src/locate.cpp)
+    host/src/locate.cpp
+    host/src/tracediff.cpp
+    host/src/describe.cpp
+    host/src/lanes.cpp
+    host/src/tracedoc.cpp)
 target_include_directories(rewind_host PUBLIC host/include)
 target_link_libraries(rewind_host PUBLIC rewind_fw rewind_sim rewind_target rewind_core)
 rewind_host_side(rewind_host)
@@ -130,6 +134,8 @@ if(REWIND_BUILD_TESTS)
         tests/test_landings.cpp
         tests/test_locate.cpp
         tests/test_dma.cpp
+        tests/test_tracediff.cpp
+        tests/test_view.cpp
         tests/test_recorder.cpp
         tests/test_timeline.cpp
         tests/test_determinism.cpp)
