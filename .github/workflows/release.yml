@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag of an existing release, e.g. 1.0.0"
+        description: "Tag of an existing release, e.g. v1.0.0 (with or without the v)"
         required: true
         type: string
 
@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.pick.outputs.tag }}
+      version: ${{ steps.pick.outputs.version }}
     steps:
       - id: pick
         env:
@@ -40,12 +41,31 @@ jobs:
           FROM_INPUT: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          tag=${FROM_RELEASE:-$FROM_INPUT}
-          # A version and nothing else: it ends up in file names and a command.
-          if ! printf '%s' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "'$tag' is not a version like 1.0.0"; exit 1
+          given=${FROM_RELEASE:-$FROM_INPUT}
+          # A version, with or without the v, and nothing else: it ends up in file
+          # names and in commands.
+          if ! printf '%s' "$given" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "'$given' is not a version tag like 1.0.0 or v1.0.0"; exit 1
           fi
+          bare=${given#v}
+          # The tag as it really is in the repository: as given, or with the v
+          # added or taken off. Typing 1.0.0 for a tag named v1.0.0 is not an error.
+          url=https://github.com/$GITHUB_REPOSITORY
+          tag=
+          for candidate in "$given" "$bare" "v$bare"; do
+            if git ls-remote --exit-code --tags "$url" "refs/tags/$candidate" > /dev/null 2>&1; then
+              tag=$candidate
+              break
+            fi
+          done
+          if [ -z "$tag" ]; then
+            echo "there is no tag '$given' (nor '$bare' nor 'v$bare') in $GITHUB_REPOSITORY. Its tags:"
+            git ls-remote --tags "$url" | sed 's#.*refs/tags/##' | grep -v '\^{}$' || true
+            exit 1
+          fi
+          echo "building the tag $tag (version $bare)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$bare" >> "$GITHUB_OUTPUT"
 
   binaries:
     needs: tag
@@ -69,6 +89,7 @@ jobs:
       - name: Check what was built, and attach it
         env:
           TAG: ${{ needs.tag.outputs.tag }}
+          VERSION: ${{ needs.tag.outputs.version }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
@@ -78,10 +99,11 @@ jobs:
           # The version inside the files is the tag's: a mismatch means the wrong
           # source was built, and nothing should be attached.
           for f in rewind-*; do
-            case $f in rewind-$TAG-*) ;; *) echo "$f does not carry the version $TAG"; exit 1 ;; esac
+            case $f in rewind-$VERSION-*) ;; *) echo "$f does not carry the version $VERSION"; exit 1 ;; esac
           done
           sha256sum -c *.sha256
           gh release view "$TAG" > /dev/null
-          gh release upload "$TAG" --clobber rewind-"$TAG"-linux-x86_64.tar.gz rewind-"$TAG"-linux-x86_64.tar.gz.sha256 \
-                rewind-"$TAG"-windows-x86_64.zip rewind-"$TAG"-windows-x86_64.zip.sha256
+          gh release upload "$TAG" --clobber \
+                rewind-"$VERSION"-linux-x86_64.tar.gz rewind-"$VERSION"-linux-x86_64.tar.gz.sha256 \
+                rewind-"$VERSION"-windows-x86_64.zip rewind-"$VERSION"-windows-x86_64.zip.sha256
           gh release view "$TAG" --json assets --jq '.assets[].name'
