@@ -59,6 +59,7 @@ private:
     u32         blocks_lost_;
     bool        opened_;
     bool        done_;
+    bool        past_image_;   // an event other than a memory image has been read
     const char* err_;
 };
 

@@ -102,6 +102,14 @@ public:
     virtual bool restore_region(u32 region, const u8* data, std::size_t len);
 };
 
+class ReplayHal;
+
+// Puts `firmware` where a recording began: power-on, its handlers installed, and
+// then, if the trace began mid-run (EV_RAM), the memory image it carries put
+// back through Firmware::restore_region. The shim must already have been reset.
+// False, with `why` set, if the firmware refuses a region of the image.
+bool start_firmware(Firmware& firmware, const ReplayHal& trace, std::string* why);
+
 // Makes the firmware that a trace's build id names, or null for one this does
 // not know. How the tools find the firmware to replay a trace with.
 typedef std::function<std::unique_ptr<Firmware>(u64 build_id)> FirmwareFactory;

@@ -37,6 +37,12 @@ struct RunConfig {
     u32          main_iters = 6000;
     fw::Variant  variant    = fw::kBuggy;
     u16          flags      = rwd::kFlagRecordWrites;
+
+    // Iterations to run before recording begins. The trace then starts mid-run,
+    // with the firmware's memory at that point stored in it (EV_RAM), and
+    // main_iters counts the iterations that are recorded. Replay it with the
+    // same main_iters, not the sum.
+    u32          skip_iters = 0;
 };
 
 // What the firmware ended up believing. Comparing this across a record and
@@ -169,8 +175,14 @@ struct FirmwareRecording {
     bool            writer_ok  = false;
     std::string     writer_error;
 };
+//
+// With `skip_iters`, that many iterations run first with nothing recorded, and
+// the trace begins there: with an image of the firmware's memory (hal_snapshot;
+// the firmware must register its state with hal_state_region from install()),
+// and `main_iters` counting only the recorded iterations.
 FirmwareRecording record_firmware(Firmware& firmware, const rwd::HalOps* backend,
-                                  u64 build_id, u64 seed, u16 flags, u32 main_iters);
+                                  u64 build_id, u64 seed, u16 flags, u32 main_iters,
+                                  u32 skip_iters = 0);
 
 // locate_run() for any firmware: where interrupts landed in a trace recorded
 // without probe points. `fw.state_hash` is the located replay's.

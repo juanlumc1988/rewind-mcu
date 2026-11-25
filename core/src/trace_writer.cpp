@@ -9,7 +9,8 @@ namespace rwd {
 TraceWriter::TraceWriter()
     : sink_(0), ctx_(0), buf_(0), cap_(0), used_(0), last_ts_(0),
       last_addr_(0), block_seq_(0), blocks_lost_(0), events_(0), bytes_(0),
-      flags_(0), ok_(false), started_(false), finished_(false), err_(0) {}
+      flags_(0), ok_(false), started_(false), finished_(false), image_open_(true),
+      err_(0) {}
 
 u32 TraceWriter::payload_cap() const {
     return cap_ - kBlockOverhead;
@@ -60,6 +61,7 @@ bool TraceWriter::begin(SinkFn sink, void* ctx, u8* buffer, u32 buf_len,
     flags_   = flags;
     ok_      = true;
     started_ = true;
+    image_open_ = true;
 
     u8 header[kTraceHeaderSize];
     for (u32 i = 0; i < kTraceHeaderSize; ++i) {
@@ -117,6 +119,9 @@ bool TraceWriter::stage(const u8* bytes, u32 n) {
     }
     used_ += n;
     ++events_;
+    if (bytes[0] != (u8)EV_RAM) {
+        image_open_ = false;   // the run has begun; no image may follow
+    }
     return true;
 }
 
@@ -226,6 +231,42 @@ bool TraceWriter::dma(u64 ts, u32 region, u32 offset, const u8* data, u32 len) {
     u8  scratch[kMaxEventBytes];
     u32 n = 0;
     scratch[n++] = (u8)EV_DMA;
+    n += varint_encode(ts - last_ts_, scratch + n);
+    n += varint_encode((u64)region, scratch + n);
+    n += varint_encode((u64)offset, scratch + n);
+    scratch[n++] = (u8)len;
+    for (u32 i = 0; i < len; ++i) {
+        scratch[n++] = data[i];
+    }
+
+    if (!stage(scratch, n)) {
+        return false;
+    }
+    last_ts_ = ts;
+    // last_addr_ is untouched: this is not a peripheral register access.
+    return true;
+}
+
+bool TraceWriter::ram(u64 ts, u32 region, u32 offset, const u8* data, u32 len) {
+    if (!ok_ || !started_ || finished_) {
+        return false;
+    }
+    if (!image_open_) {
+        fail("memory image after the run began");
+        return false;
+    }
+    if (data == 0 || len == 0 || len > kMaxRamChunk) {
+        fail("memory image chunk empty or longer than kMaxRamChunk");
+        return false;
+    }
+    if (ts < last_ts_) {
+        fail("non-monotonic timestamp");
+        return false;
+    }
+
+    u8  scratch[kMaxEventBytes];
+    u32 n = 0;
+    scratch[n++] = (u8)EV_RAM;
     n += varint_encode(ts - last_ts_, scratch + n);
     n += varint_encode((u64)region, scratch + n);
     n += varint_encode((u64)offset, scratch + n);

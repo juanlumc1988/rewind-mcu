@@ -145,6 +145,7 @@ if(REWIND_BUILD_TESTS)
         tests/test_dma.cpp
         tests/test_nested.cpp
         tests/test_firmware.cpp
+        tests/test_ram.cpp
         tests/test_tracediff.cpp
         tests/test_view.cpp
         tests/test_version.cpp

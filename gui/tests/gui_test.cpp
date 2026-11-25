@@ -76,6 +76,7 @@ private Q_SLOTS:
     void aTraceThatCannotBeReadIsRefused();
     void aTraceWithoutFirmwareHasNoState();
     void aFirmwareThatIsNotTheExampleIsShownThroughItsFactory();
+    void aTraceThatBeganMidRunStartsFromItsImage();
     void theWindowIsNotBlank();
 };
 
@@ -597,6 +598,34 @@ void GuiTest::aFirmwareThatIsNotTheExampleIsShownThroughItsFactory() {
     // Another seed, so another run: some variable differs, and is tinted.
     QVERIFY(sp->differingRows() > 0);
     QVERIFY(w.summary().contains(QStringLiteral("then differ")));
+}
+
+void GuiTest::aTraceThatBeganMidRunStartsFromItsImage() {
+    rwhost::RunConfig cfg;
+    cfg.seed       = 4;
+    cfg.skip_iters = 2500;
+    cfg.main_iters = 1000;
+    const rwhost::RecordResult part = rwhost::record_run(cfg);
+    QVERIFY(part.writer_ok);
+    cfg.skip_iters = 0;
+    cfg.main_iters = 2500;
+    const rwhost::RecordResult upto = rwhost::record_run(cfg);
+
+    MainWindow w;
+    w.setMainIters(1000);
+    QString err;
+    QVERIFY2(w.openBytes(MainWindow::kSideA, part.trace, QStringLiteral("mid.rwd"), &err), qPrintable(err));
+    w.show();
+
+    // The list begins with the image, and the state at the start is the one the
+    // firmware had when recording began -- not a firmware at power-on.
+    const QAbstractItemModel* m = w.table(MainWindow::kSideA)->model();
+    QVERIFY(m->data(m->index(0, EventModel::kColEvent)).toString().startsWith(QStringLiteral("ram region 0")));
+    w.setCursor(MainWindow::kSideA, 0);
+    const int consumed = w.statePanel()->rowOf(QStringLiteral("consumed"));
+    QVERIFY(consumed >= 0);
+    QCOMPARE(cellText(w.statePanel(), consumed, 0), QString::number(upto.fw.consumed));
+    QVERIFY(upto.fw.consumed > 0u);
 }
 
 void GuiTest::theWindowIsNotBlank() {

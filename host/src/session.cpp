@@ -154,7 +154,18 @@ RecordResult record_run(const RunConfig& cfg) {
         return result;
     }
 
+    // A recording that starts mid-run: the firmware has been running, with
+    // nothing recorded, and from here on it is -- first its memory as it stands.
+    if (cfg.skip_iters > 0) {
+        fw::rx_pump_run(cfg.variant, cfg.skip_iters);
+    }
     rwd::hal_mode_record(&writer);
+    if (cfg.skip_iters > 0 && !rwd::hal_snapshot()) {
+        result.writer_error = writer.ok() ? "the memory image could not be written"
+                                          : writer.error();
+        rwd::hal_reset();
+        return result;
+    }
     fw::rx_pump_run(cfg.variant, cfg.main_iters);
     writer.finish(rwd::hal_now());
     rwd::hal_mode_off();
@@ -187,8 +198,12 @@ ReplayResult replay_firmware(Firmware& firmware, const std::vector<u8>& trace,
     result.sites_recorded = hal.sites_recorded();
 
     rwd::hal_reset();
-    firmware.reset();
-    firmware.install();
+    std::string why;
+    if (!start_firmware(firmware, hal, &why)) {
+        result.loaded = false;
+        result.error  = why;
+        return result;
+    }
     rwd::hal_attach(hal.ops());
     rwd::hal_mode_replay();
 
@@ -218,7 +233,8 @@ ReplayResult replay_run_as(const std::vector<u8>& trace, fw::Variant variant,
 }
 
 FirmwareRecording record_firmware(Firmware& firmware, const rwd::HalOps* backend,
-                                  u64 build_id, u64 seed, u16 flags, u32 main_iters) {
+                                  u64 build_id, u64 seed, u16 flags, u32 main_iters,
+                                  u32 skip_iters) {
     FirmwareRecording result;
 
     VectorSink          sink;
@@ -236,7 +252,17 @@ FirmwareRecording record_firmware(Firmware& firmware, const rwd::HalOps* backend
         return result;
     }
 
+    if (skip_iters > 0) {
+        firmware.run(skip_iters);
+    }
     rwd::hal_mode_record(&writer);
+    if (skip_iters > 0 && !rwd::hal_snapshot()) {
+        result.writer_error = writer.ok() ? "the memory image could not be written (did the "
+                                            "firmware register a state region?)"
+                                          : writer.error();
+        rwd::hal_reset();
+        return result;
+    }
     firmware.run(main_iters);
     writer.finish(rwd::hal_now());
     rwd::hal_mode_off();
@@ -263,8 +289,8 @@ struct LocateCtx {
 void run_firmware_once(void* ctx, ReplayHal* hal) {
     const LocateCtx* c = static_cast<const LocateCtx*>(ctx);
     rwd::hal_reset();
-    c->firmware->reset();
-    c->firmware->install();
+    // Cannot fail here: locate_firmware() has tried the same image already.
+    start_firmware(*c->firmware, *hal, 0);
     rwd::hal_attach(hal->ops());
     rwd::hal_mode_replay();
     c->firmware->run(c->main_iters);
@@ -280,6 +306,12 @@ LocateReport locate_firmware(Firmware& firmware, const std::vector<u8>& trace,
     ReplayHal probe;
     if (!probe.load(trace.data(), trace.size())) {
         report.error = probe.error();
+        return report;
+    }
+    std::string why;
+    rwd::hal_reset();
+    if (!start_firmware(firmware, probe, &why)) {
+        report.error = why;
         return report;
     }
     report.loaded       = true;

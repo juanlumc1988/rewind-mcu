@@ -41,6 +41,7 @@
 //   EV_IRQ_AT      delta_ts, vector, return_pc      (version 3)
 //   EV_SITE        delta_ts, site_id                (version 4)
 //   EV_DMA         delta_ts, region, offset, len, bytes[len]   (version 5)
+//   EV_RAM         delta_ts, region, offset, len, bytes[len]   (version 6)
 //   EV_STOP        delta_ts
 //
 // EV_IRQ_AT is EV_IRQ_ENTER plus the address the CPU will return to: the PC
@@ -66,6 +67,20 @@
 // where in it. One event holds at most kMaxDmaChunk bytes; a longer read is
 // several events, split the same way on record and on replay. Versions before
 // 5 have none and still read.
+//
+// EV_RAM is the opposite end of the same idea: not what the firmware read while
+// it ran but what its memory held when recording began. Replay re-executes the
+// firmware, and re-executing is only faithful from the state the recording
+// started in; from reset that state is a given, but a recording that starts
+// later -- the last stretch before a failure, kept by a ring that never was
+// emptied -- starts from whatever the firmware had built up by then. The
+// firmware names the regions of its RAM that make up its state (hal_state_region
+// in hal.h) and the recorder writes their contents, in chunks of at most
+// kMaxRamChunk bytes, before any other event. `region` is the firmware's own id,
+// as for DMA, and `offset` is where in it. It is an image, not an input: replay
+// puts it back and does not serve it as a crossing. Because the point of it is
+// to be first, one anywhere but at the start is damage, and the reader says so.
+// Versions before 6 have none and still read.
 //
 // Two fields are deltas against the previous event, across the whole stream
 // rather than per block, and both earn their keep:
@@ -95,7 +110,7 @@ namespace rwd {
 
 // Stored little-endian, so byte 0 is 'R' (0x52) and byte 3 is 'D' (0x44).
 const u32 kTraceMagic      = 0x444E5752u;
-const u16 kTraceVersion    = 5;
+const u16 kTraceVersion    = 6;
 const u16 kTraceMinVersion = 2;   // oldest version the reader still accepts
 const u32 kTraceHeaderSize = 32;
 
@@ -109,13 +124,17 @@ enum EventType {
     EV_STOP       = 0x04,
     EV_IRQ_AT     = 0x05,
     EV_SITE       = 0x06,
-    EV_DMA        = 0x07
+    EV_DMA        = 0x07,
+    EV_RAM        = 0x08
 };
 
 // Most bytes one EV_DMA event carries. Small, because the block buffer is
 // caller-supplied and may be only kMinBlockBuffer bytes; a read of more is
 // split into several events.
 const u32 kMaxDmaChunk = 16;
+
+// The same limit for the chunks of a memory image (EV_RAM), for the same reason.
+const u32 kMaxRamChunk = kMaxDmaChunk;
 
 enum TraceFlags {
     // Writes are firmware *output*: given identical inputs they are implied,
@@ -152,8 +171,8 @@ struct Event {
     u32 addr;   // EV_MMIO_*: address.  EV_IRQ_*: vector number.
                 // EV_SITE: the site label.
     u32 value;  // EV_MMIO_*: value.    EV_IRQ_AT: return address.
-                // EV_DMA: the offset into the region.  Otherwise zero.
-    // EV_DMA only: addr is the region, and these are the bytes read.
+                // EV_DMA, EV_RAM: the offset into the region.  Otherwise zero.
+    // EV_DMA and EV_RAM only: addr is the region, and these are the bytes.
     u8  len;
     u8  data[kMaxDmaChunk];
 };

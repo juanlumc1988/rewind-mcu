@@ -143,7 +143,7 @@ private:
 
     // Puts the shim into replay mode with a given firmware state and cursor;
     // with no state, the firmware as it is at power-on.
-    void install(const std::vector<u8>* state, std::size_t cursor, u64 ts);
+    bool install(const std::vector<u8>* state, std::size_t cursor, u64 ts);
     void fill(Snapshot* snap) const;
     const Checkpoint* nearest(std::size_t event_index) const;
     static void capture(void* ctx);

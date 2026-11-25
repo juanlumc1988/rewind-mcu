@@ -49,6 +49,18 @@ public:
     const rwd::HalOps* ops() const { return &ops_; }
     const rwd::TraceHeader& header() const { return header_; }
 
+    // A trace that began mid-run starts with an image of the firmware's memory
+    // (EV_RAM). Those events are in the list like any other, so indices mean
+    // the same here as in a reader, but they are not served: the replay starts
+    // after them, and the image is for the firmware to be put back in.
+    // first_event() is the index of the first event the firmware will ask for;
+    // it is 0 for a trace that began at reset.
+    std::size_t first_event() const { return first_event_; }
+    bool        has_image() const { return first_event_ > 0; }
+    // The image, one buffer per region, each as long as the furthest byte of it
+    // that was recorded (anything the chunks did not cover reads as zero).
+    std::map<u32, std::vector<u8> > image() const;
+
     const char* error() const { return error_.c_str(); }
     const std::string& divergence() const { return divergence_; }
     bool diverged() const { return !divergence_.empty(); }
@@ -129,6 +141,8 @@ private:
     u64                        now_;
     std::size_t                divergence_cursor_;
     bool                       sites_recorded_;
+    std::size_t                first_event_;   // past the memory image
+    u64                        start_now_;     // the clock the image was taken at
     u32                        probe_count_;   // sites since the last crossing
     std::map<std::size_t, u32> landings_;
     std::size_t                capture_at_;

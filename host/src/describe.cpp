@@ -28,8 +28,17 @@ const char* event_kind(u8 type) {
         case rwd::EV_IRQ_AT:     return "irq";
         case rwd::EV_SITE:       return "site";
         case rwd::EV_DMA:        return "dma";
+        case rwd::EV_RAM:        return "ram";
         case rwd::EV_STOP:       return "stop";
         default:                 return "?";
+    }
+}
+
+const char* irq_name(u32 vector) {
+    switch (vector) {
+        case sim::kIrqUartRx: return "UART_RX";
+        case sim::kIrqTimer:  return "TIMER";
+        default:              return "";
     }
 }
 
@@ -46,20 +55,19 @@ std::string describe_event(const rwd::Event& e) {
         }
         case rwd::EV_IRQ_ENTER:
             std::snprintf(buf, sizeof(buf), "irq vector %u%s%s", e.addr,
-                          e.addr == sim::kIrqUartRx ? " " : "",
-                          e.addr == sim::kIrqUartRx ? "UART_RX" : "");
+                          irq_name(e.addr)[0] ? " " : "", irq_name(e.addr));
             break;
         case rwd::EV_IRQ_AT:
             std::snprintf(buf, sizeof(buf), "irq vector %u%s%s returns to 0x%08X", e.addr,
-                          e.addr == sim::kIrqUartRx ? " " : "",
-                          e.addr == sim::kIrqUartRx ? "UART_RX" : "", e.value);
+                          irq_name(e.addr)[0] ? " " : "", irq_name(e.addr), e.value);
             break;
         case rwd::EV_SITE:
             std::snprintf(buf, sizeof(buf), "site %u", e.addr);
             break;
+        case rwd::EV_RAM:
         case rwd::EV_DMA: {
-            int n = std::snprintf(buf, sizeof(buf), "dma region %u +%u len %u ", e.addr, e.value,
-                                  (unsigned)e.len);
+            int n = std::snprintf(buf, sizeof(buf), "%s region %u +%u len %u ", event_kind(e.type),
+                                  e.addr, e.value, (unsigned)e.len);
             for (u32 i = 0; i < (u32)e.len && n > 0 && n + 3 < (int)sizeof(buf); ++i) {
                 n += std::snprintf(buf + n, sizeof(buf) - (std::size_t)n, "%02X", (unsigned)e.data[i]);
             }

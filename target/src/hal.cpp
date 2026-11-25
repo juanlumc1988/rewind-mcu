@@ -14,6 +14,13 @@ TraceWriter*  g_writer     = 0;
 Mode          g_mode       = MODE_OFF;
 IsrFn         g_isr[kMaxIrqVectors];
 u8            g_prio[kMaxIrqVectors];
+struct StateRegion {
+    u32      id;
+    const u8* base;
+    u32      size;
+};
+StateRegion   g_region[kMaxStateRegions];
+u32           g_region_count = 0;
 u32           g_mask_depth = 0;
 u32           g_depth      = 0;            // handlers running, nested
 u32           g_level      = kThreadLevel; // urgency of the innermost one
@@ -74,6 +81,7 @@ void hal_reset() {
     g_depth      = 0;
     g_level      = kThreadLevel;
     g_divergence = 0;
+    g_region_count = 0;
     for (u32 i = 0; i < kMaxIrqVectors; ++i) {
         g_isr[i]  = 0;
         g_prio[i] = 0;
@@ -203,6 +211,42 @@ void hal_dma_read(u32 region, u32 offset, void* dst, u32 len) {
         offset += n;
         len    -= n;
     }
+}
+
+bool hal_state_region(u32 id, const void* base, u32 size) {
+    if (base == 0 || size == 0 || g_region_count >= kMaxStateRegions) {
+        return false;
+    }
+    for (u32 i = 0; i < g_region_count; ++i) {
+        if (g_region[i].id == id) {
+            return false;
+        }
+    }
+    g_region[g_region_count].id   = id;
+    g_region[g_region_count].base = static_cast<const u8*>(base);
+    g_region[g_region_count].size = size;
+    ++g_region_count;
+    return true;
+}
+
+bool hal_snapshot() {
+    if (g_mode != MODE_RECORD || g_writer == 0 || g_region_count == 0) {
+        return false;
+    }
+    const u64 ts = (g_ops != 0 && g_ops->now != 0) ? g_ops->now(g_ops->ctx) : 0;
+
+    for (u32 r = 0; r < g_region_count; ++r) {
+        u32 offset = 0;
+        while (offset < g_region[r].size) {
+            const u32 left = g_region[r].size - offset;
+            const u32 n    = left < kMaxRamChunk ? left : kMaxRamChunk;
+            if (!g_writer->ram(ts, g_region[r].id, offset, g_region[r].base + offset, n)) {
+                return false;
+            }
+            offset += n;
+        }
+    }
+    return true;
 }
 
 u64 hal_now() {

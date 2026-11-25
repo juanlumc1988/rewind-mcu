@@ -54,6 +54,10 @@ const rwd::u32 kSitePendingRmw = 1;
 
 const rwd::u32 kRingSize = 16;
 
+// The id of the region that is the firmware's whole state, for a recording that
+// begins mid-run (hal_state_region).
+const rwd::u32 kStateRegion = 0;
+
 struct State {
     rwd::u8  ring[kRingSize];
     rwd::u32 head;       // written by the ISR

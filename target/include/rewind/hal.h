@@ -195,6 +195,42 @@ void hal_site(u32 id);
 // With no backend, or one without DMA, the bytes read are zero.
 void hal_dma_read(u32 region, u32 offset, void* dst, u32 len);
 
+// A recording that does not start at reset.
+//
+// Replay re-executes the firmware, which is only faithful from the state the
+// recording began in. From reset that is given; from the middle of a run -- the
+// last stretch before a failure, with the lead-up not worth keeping -- it is
+// whatever the firmware had built up. So the firmware says which parts of its
+// RAM are its state, and the recorder writes their contents into the trace
+// before the first event (EV_RAM), where replay finds them and puts them back.
+//
+//     hal_state_region(0, &g_state, sizeof(g_state));   // once, at start-up
+//     ...                                               // the firmware runs
+//     recorder.start();                                 // recording begins
+//     hal_snapshot();                                   // here, at a quiet point
+//
+// The ids are the firmware's own and must be the ones its host build gives to
+// Firmware::restore_region, because a device address means nothing on the host.
+// Call hal_snapshot() where the state is whole -- between iterations of the main
+// loop, not inside an interrupt handler or a critical section -- and with
+// recording on and nothing recorded yet.
+//
+// What is in a region is the firmware's to get right: a variable left out of
+// every region is one a replay will not have, and it will diverge from the
+// recording for reasons that look like a firmware bug. The image costs the size
+// of the regions plus about five bytes per sixteen, once. Large state is not
+// what this is for.
+const u32 kMaxStateRegions = 4;
+
+// Declares `size` bytes at `base` as (part of) the firmware's state, as region
+// `id`. False for a null base, an empty region, a repeated id or no room.
+bool hal_state_region(u32 id, const void* base, u32 size);
+
+// Writes the registered regions into the trace as EV_RAM events. False if not
+// recording, nothing is registered, or the trace refuses them (including: an
+// event has been recorded already).
+bool hal_snapshot();
+
 // Instrumentation only. Under MODE_REPLAY this reports the timestamp of the
 // last consumed event, which tracks the recorded clock at every MMIO access
 // but not between them. Firmware that needs the time must read its timer

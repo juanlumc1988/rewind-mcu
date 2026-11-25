@@ -117,7 +117,10 @@ public:
 
     const char* name() const override { return "blinker"; }
     void reset() override { std::memset(&g_state, 0, sizeof(g_state)); g_inverted = inverted_; }
-    void install() override { rwd::hal_set_isr(kIrqButton, &button_isr); }
+    void install() override {
+        rwd::hal_set_isr(kIrqButton, &button_isr);
+        rwd::hal_state_region(0, &g_state, sizeof(g_state));
+    }
     void run(u32 n) override {
         for (u32 i = 0; i < n; ++i) {
             const u32 b = rwd::mmio_read32(kBtn);

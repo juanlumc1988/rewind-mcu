@@ -120,6 +120,9 @@ void rx_pump_reset() {
 
 void rx_pump_install() {
     rwd::hal_set_isr(sim::kIrqUartRx, &isr_uart_rx);
+    // All of this firmware's state is g_state, so a recording that starts
+    // mid-run can carry it (hal_snapshot).
+    rwd::hal_state_region(kStateRegion, &g_state, sizeof(g_state));
 }
 
 void rx_pump_run(Variant variant, u32 main_iters) {

@@ -13,16 +13,21 @@ Timeline::Timeline()
       event_count_(0), position_(0), last_search_seeks_(0), opened_(false),
       pending_(0), current_iter_(0) {}
 
-void Timeline::install(const std::vector<u8>* state, std::size_t cursor, u64 ts) {
+bool Timeline::install(const std::vector<u8>* state, std::size_t cursor, u64 ts) {
     rwd::hal_reset();
-    firmware_->reset();
-    firmware_->install();
     if (state != 0) {
+        firmware_->reset();
+        firmware_->install();
         firmware_->restore_state(state->data());
+    } else if (!start_firmware(*firmware_, replay_, &error_)) {
+        // Where the recording began, which may be mid-run.
+        rwd::hal_reset();
+        return false;
     }
     rwd::hal_attach(replay_.ops());
     rwd::hal_mode_replay();
     replay_.set_cursor(cursor, ts);
+    return true;
 }
 
 // What the firmware's state is right now, into a snapshot.
@@ -98,7 +103,9 @@ bool Timeline::open(const std::vector<u8>& trace, Firmware* firmware, u32 main_i
     // One full pass, snapshotting between iterations. Iteration boundaries
     // are the only points where a copy of the state is a complete description
     // of the run: no call in progress, interrupt mask balanced.
-    install(0, 0, 0);
+    if (!install(0, replay_.first_event(), replay_.now())) {
+        return false;
+    }
     replay_.clear_capture_point();
 
     for (u32 iter = 0; iter < main_iters_; ++iter) {
@@ -144,6 +151,11 @@ bool Timeline::seek(std::size_t event_index, Snapshot* out) {
     }
     if (event_index > event_count_) {
         event_index = event_count_;
+    }
+    // Before the first event the firmware asks for there is only the state the
+    // recording began in -- a trace that began mid-run has a memory image there.
+    if (event_index < replay_.first_event()) {
+        event_index = replay_.first_event();
     }
 
     const Checkpoint* cp = nearest(event_index);
