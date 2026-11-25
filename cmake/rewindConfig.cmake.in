@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Part of rewind -- deterministic record & replay for bare-metal firmware.
+#
+#   find_package(rewind 1 REQUIRED)
+#
+# Provides rewind::core, rewind::target, rewind::sim, rewind::fw and
+# rewind::host -- and rewind::gui when it was installed with the viewer.
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+include("${CMAKE_CURRENT_LIST_DIR}/rewindTargets.cmake")
+
+if(@REWIND_HAS_GUI@)
+    find_dependency(Qt6 COMPONENTS Widgets)
+    include("${CMAKE_CURRENT_LIST_DIR}/rewindGuiTargets.cmake")
+endif()
+
+check_required_components(rewind)

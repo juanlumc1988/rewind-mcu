@@ -42,7 +42,8 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
                 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-                -DREWIND_WERROR=ON
+                -DREWIND_WERROR=ON \
+                -DREWIND_BUILD_EXAMPLES=ON
 
       - name: Build
         run: cmake --build build -j
@@ -55,6 +56,7 @@ jobs:
       - name: Exercise the command line
         run: |
           set -euo pipefail
+          ./build/rewind --version | grep -E '^rewind [0-9]+\.[0-9]+\.[0-9]+ '
           ./build/rewind hunt --from 1 --to 30 --save /tmp/bug.rwd
           ./build/rewind dump /tmp/bug.rwd --limit 20
           ./build/rewind inspect /tmp/bug.rwd --find-consumed 5
@@ -65,6 +67,15 @@ jobs:
           ./build/rewind replay /tmp/bug.rwd
           ./build/rewind record --seed 1 --variant fixed --out /tmp/clean.rwd
           ./build/rewind replay /tmp/clean.rwd
+          # A recording that starts mid-run carries its memory in the trace, and
+          # replays to the state the whole run ends in.
+          ./build/rewind record --seed 2 --variant fixed --iters 6000 --out /tmp/whole.rwd
+          ./build/rewind record --seed 2 --variant fixed --iters 3000 --skip 3000 --out /tmp/half.rwd
+          ./build/rewind dump /tmp/half.rwd --limit 6
+          whole=$(./build/rewind replay /tmp/whole.rwd | grep -o 'state hash 0x[0-9A-F]*')
+          half=$(./build/rewind replay /tmp/half.rwd --iters 3000 | grep -o 'state hash 0x[0-9A-F]*')
+          echo "whole: $whole / from the middle: $half"
+          test -n "$whole" && test "$whole" = "$half"
 
   # Address and undefined-behaviour sanitizers over the whole suite. The
   # trace reader parses input it has no reason to trust, and the tests feed
@@ -143,6 +154,25 @@ jobs:
             exit 1
           fi
           echo "clean: no heap, no exceptions, no RTTI"
+
+      # What a project with firmware of its own does: install the device-side
+      # libraries, and build its device code against them under the device's
+      # rules (C++98, no exceptions, no RTTI). The thermostat in
+      # examples/custom-firmware is that code, and it is the same source the
+      # host replays.
+      - name: Build a firmware of one's own against the installed libraries
+        run: |
+          set -euo pipefail
+          cmake --install build-arm --prefix /tmp/rewind-arm
+          test ! -e /tmp/rewind-arm/include/rewind/replay.h   # host code is not installed for the part
+          arm-none-eabi-g++ -std=c++98 -pedantic-errors -Wall -Wextra -Werror -Wno-long-long \
+                -mcpu=cortex-m4 -mthumb -Os -fno-exceptions -fno-rtti \
+                -I/tmp/rewind-arm/include \
+                -c examples/custom-firmware/thermostat.cpp -o /tmp/thermostat.o
+          arm-none-eabi-size /tmp/thermostat.o
+          if arm-none-eabi-nm -u /tmp/thermostat.o | grep -iE 'malloc|free|_Unwind|__cxa|typeinfo|operator new'; then
+            echo "the example pulled in a forbidden runtime dependency"; exit 1
+          fi
 
       - name: Report flash footprint
         run: |
@@ -242,3 +272,67 @@ jobs:
           ./build-gui/rewind-gui /tmp/buggy.rwd /tmp/fixed.rwd --first-diff \
                 --screenshot /tmp/viewer.png --size 1180x720
           test "$(stat -c %s /tmp/viewer.png)" -gt 50000
+
+      # A viewer for a firmware that is not the example: the same window, given
+      # the factory for its own. Built the way a user's project would, against the
+      # installed package.
+      - name: Install, and build a viewer for another firmware against the package
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          cmake --install build-gui --prefix /tmp/rewind-gui-prefix
+          cmake -S examples/custom-firmware -B build-example -G Ninja \
+                -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }} \
+                -DCMAKE_PREFIX_PATH=/tmp/rewind-gui-prefix
+          cmake --build build-example -j
+          ./build-example/thermostat_replay /tmp/thermostat.rwd
+          ./build-example/thermostat_viewer /tmp/thermostat.rwd & pid=$!
+          sleep 3
+          kill -0 $pid   # still up: the window opened a trace and is running
+          kill $pid
+
+  # The installed package, from nothing: install rewind, then build a project
+  # that is not part of it against what was installed -- through find_package,
+  # as a user would -- and run it. Also that the version it announces is the
+  # version it will accept being asked for, and no other major.
+  package:
+    name: installed package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Build and install rewind
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DREWIND_BUILD_TESTS=OFF
+          cmake --build build -j
+          cmake --install build --prefix /tmp/rewind-prefix
+
+      - name: Build and run a project of one's own against it
+        run: |
+          set -euo pipefail
+          cmake -S examples/custom-firmware -B build-example -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/tmp/rewind-prefix
+          cmake --build build-example -j
+          ./build-example/thermostat_replay /tmp/thermostat.rwd
+          # And the installed command line reads the trace the example wrote.
+          /tmp/rewind-prefix/bin/rewind --version
+          /tmp/rewind-prefix/bin/rewind dump /tmp/thermostat.rwd --limit 5
+
+      - name: The package accepts its own major version and no other
+        run: |
+          set -euo pipefail
+          mkdir /tmp/vt
+          printf 'cmake_minimum_required(VERSION 3.16)\nproject(vt LANGUAGES CXX)\nfind_package(rewind ${V} REQUIRED)\n' > /tmp/vt/CMakeLists.txt
+          for ok in 1 1.0; do
+            cmake -S /tmp/vt -B /tmp/vt/b-$ok -DV=$ok -DCMAKE_PREFIX_PATH=/tmp/rewind-prefix
+          done
+          for refused in 2 0.9 1.5; do
+            if cmake -S /tmp/vt -B /tmp/vt/b-$refused -DV=$refused -DCMAKE_PREFIX_PATH=/tmp/rewind-prefix; then
+              echo "find_package(rewind $refused) should have been refused"; exit 1
+            fi
+          done
